@@ -27,13 +27,16 @@
 4. **Захват задания** — одна короткая транзакция:
    1. выбрать самое старое задание в `queued` (в PostgreSQL — `FOR UPDATE SKIP LOCKED`, чтобы worker не ждали друг друга; в SQLite запись и так последовательна);
    2. проверить, что его можно начать: стратегия с нужной версией есть в Registry, снимок для повторного запуска существует;
-   3. выполнить compare-and-set: при успешной проверке — `queued → running`, иначе — `queued → failed` с кодом `strategy_unavailable` или `snapshot_not_found`.
+   3. выполнить переход через JobLifecycle: при успешной проверке — `queued → running`, иначе — `queued → failed` с кодом `strategy_unavailable` или `snapshot_not_found`. Как и любой переход, захват — это compare-and-set и запись в `JobStatusHistory` в той же транзакции; напрямую JobRunner состояние не меняет.
 
    ```sql
    UPDATE backtest_job
       SET state = 'running', worker_id = :worker_id,
           lease_expires_at = now() + :lease, deadline_at = now() + :job_timeout
     WHERE id = :id AND state = 'queued';
+   -- если обновлена одна строка:
+   INSERT INTO job_status_history (job_id, from_state, to_state, actor, changed_at)
+   VALUES (:id, 'queued', 'running', :worker_id, now());
    ```
 
    Если строка не обновилась, задание уже отменено или взято другим worker, и этот worker пробует следующее.
@@ -43,7 +46,15 @@
 
 6. Worker держит задание по **аренде**: продлевает `lease_expires_at` heartbeat-ом (`UPDATE … WHERE id = :id AND state = 'running' AND worker_id = :worker_id`). Если строка не обновилась, задание отменено или отобрано, и worker прекращает его обработку.
 7. У задания есть **срок выполнения** `deadline_at`. Dispatcher проверяет его между вызовами Tool.
-8. **Reaper** работает в каждом экземпляре worker и периодически переводит в `failed` задания `running`, у которых истекла аренда (`worker_lost`) или срок выполнения (`job_timeout`).
+8. **Reaper** работает в каждом экземпляре worker и периодически переводит в `failed` задания `running`, у которых истекла аренда (`worker_lost`) или срок выполнения (`job_timeout`). Истечение проверяется повторно в самом compare-and-set, чтобы не завершить задание, аренду которого worker продлил между выборкой и записью:
+
+   ```sql
+   UPDATE backtest_job
+      SET state = 'failed', error_code = 'worker_lost'
+    WHERE id = :id AND state = 'running' AND worker_id = :worker_id
+      AND lease_expires_at < now();
+   -- если обновлена одна строка — запись в job_status_history в той же транзакции
+   ```
 9. Все сроки считаются по часам БД (`now()`), а не по часам worker.
 10. Значения по умолчанию задаются переменными окружения: опрос очереди — каждую 1 с, аренда — 30 с, heartbeat — каждые 10 с, проверка Reaper — каждые 10 с, срок выполнения — 5 мин.
 
