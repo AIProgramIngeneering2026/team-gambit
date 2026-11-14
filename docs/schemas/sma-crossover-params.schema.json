@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:tradelab:sma-crossover:1.0.0:params",
+  "title": "SMA crossover parameters",
+  "description": "validate_params additionally enforces fast < slow and applies defaults.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "fast": {"type": "integer", "minimum": 1, "maximum": 499, "default": 20},
+    "slow": {"type": "integer", "minimum": 2, "maximum": 500, "default": 50}
+  }
+}
