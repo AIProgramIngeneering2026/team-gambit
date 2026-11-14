@@ -1,0 +1,2012 @@
+openapi: 3.1.0
+info:
+  title: TradeLab API
+  version: 0.1.0
+  summary: Бэктест торговых стратегий и текущий сигнал стратегии
+  description: |
+    Контракт HTTP API TradeLab. Сценарии и критерии приёмки — `docs/requirements.md`,
+    компоненты и жизненный цикл Job — `docs/architecture.md`, контракт стратегий — `docs/tool-contract.md`,
+    модель выполнения — `docs/adr/0001-execution-model.md`, идемпотентность — `docs/adr/0002-idempotency.md`.
+
+    ## Модель работы
+
+    Бэктест выполняется асинхронно. `POST /jobs` проверяет запрос, сохраняет задание и ставит его в очередь
+    одной транзакцией и отвечает `202 Accepted`. Состояние задания читается через `GET /jobs/{job_id}`,
+    результат — через `GET /jobs/{job_id}/result`. Состояние `created` есть в модели, но через API в MVP
+    не наблюдается: задание сохраняется сразу в очереди.
+
+    Текущий сигнал (`POST /signal`) считается синхронно и задание не создаёт.
+
+    ## Доступ
+
+    Каждый запрос, кроме `GET /health`, передаёт ключ клиента в заголовке `X-API-Key`. Ключи выдаются через
+    конфигурацию сервера (переменные окружения), в репозитории их нет. Нет ключа или ключ неверный — `401 unauthorized`.
+
+    Задания, сравнения и ключи идемпотентности принадлежат клиенту, который их создал. Чужое и несуществующее
+    задание неразличимы: оба дают `404 job_not_found` с одинаковым телом, поэтому по ответу нельзя узнать,
+    существует ли чужой id. Идентификаторы — UUID v4, их нельзя перебрать. Каталог стратегий и инструментов
+    общий для всех клиентов. Снимки свечей — общие рыночные данные без привязки к клиенту.
+
+    ## Идемпотентность
+
+    Операции, которые создают задания (`POST /jobs`, `POST /jobs/{job_id}/rerun`, `POST /comparisons`),
+    требуют заголовок `Idempotency-Key`. Повтор с тем же ключом и тем же запросом в течение 24 часов возвращает
+    `200` с тем же ресурсом и заголовком `Idempotent-Replayed: true`; новый ресурс не создаётся. Тот же ключ
+    с другим запросом — `409 idempotency_key_reused`. Одновременные запросы с одним ключом создают ровно один
+    ресурс. Подробно и с обоснованием — ADR 0002.
+
+    Остальные операции ключ не используют: чтение не меняет состояние, `POST /signal` не создаёт ресурсов,
+    повтор отмены отвечает `409 job_state_conflict` с `current_state: canceled` — цель уже достигнута.
+
+    ## Ошибки
+
+    Все ошибки, кроме ответа `GET /health`, возвращаются в одном формате (схема `Error`):
+
+    ```json
+    {
+      "error": {
+        "code": "invalid_params",
+        "message": "fast должен быть меньше slow",
+        "details": {"field": "params.fast", "reason": "must_be_less_than_slow"},
+        "correlation_id": "c0a8012e-5f1d-4c2b-9e3a-7b6d8f9e0a11"
+      }
+    }
+    ```
+
+    - `code` — машиночитаемый код из перечня `ErrorCode`, по нему клиент выбирает поведение;
+    - `message` — пояснение для человека, текст может меняться;
+    - `details.field` — путь к проблемному полю (`ticker`, `period.start`, `params.fast`,
+      `strategies[1].params.slow`) или имя заголовка;
+    - `details.reason` — машиночитаемая причина: `required`, `wrong_type`, `invalid_format`, `out_of_range`,
+      `unknown_field`, `unknown_ticker`, `must_be_before_end`, `in_future`, `too_long`, `too_many`, `duplicate`,
+      `less_than_required_bars`, `not_found`, `ticker_mismatch`, `period_not_covered`; стратегии добавляют
+      свои причины (`must_be_less_than_slow` — `docs/tool-contract.md`); у других кодов — `too_large`,
+      `different_request`, `job_not_finished`, `timeout`, `missing_field`;
+    - `details.allowed` — допустимые значения или диапазон;
+    - `correlation_id` — тот же, что в заголовке ответа `X-Correlation-ID` и в логах сервера.
+
+    Ошибка валидации описывает первое найденное нарушение. Порядок проверки фиксирован: структура запроса
+    и типы, общие поля (`ticker`, `period`, `initial_capital`, `commission_rate`, `snapshot_id`), затем
+    параметры стратегии через `validate_params`. Запрос, отклонённый с кодом `4xx`, не создаёт задание.
+
+    | HTTP | `code` | Когда |
+    |---|---|---|
+    | 400 | `malformed_request` | Тело не JSON, не объект или `Content-Type` не `application/json` |
+    | 400 | `missing_idempotency_key` | Нет `Idempotency-Key` у операции, создающей задания |
+    | 400 | `invalid_idempotency_key` | Ключ не соответствует формату |
+    | 401 | `unauthorized` | Нет `X-API-Key` или ключ неверный |
+    | 404 | `not_found` | Неизвестный путь |
+    | 404 | `job_not_found` | Задания нет или оно чужое |
+    | 404 | `comparison_not_found` | Сравнения нет или оно чужое |
+    | 405 | `method_not_allowed` | Метод не поддерживается для пути |
+    | 409 | `idempotency_key_reused` | Тот же ключ с другим запросом |
+    | 409 | `job_state_conflict` | Действие запрещено в текущем состоянии задания |
+    | 409 | `result_not_ready` | Задание ещё в `queued` или `running` |
+    | 409 | `result_not_available` | Задание в `failed` или `canceled`, результата не будет |
+    | 413 | `payload_too_large` | Тело больше 64 КиБ |
+    | 422 | `invalid_params` | Поле отсутствует, неверного типа или вне допустимых значений |
+    | 422 | `unknown_operation` | Стратегии нет в каталоге |
+    | 429 | `too_many_active_jobs` | У клиента уже 20 заданий в `queued` и `running` |
+    | 500 | `internal_error` | Непредвиденная ошибка сервера |
+    | 502 | `invalid_market_data` | Поставщик ответил некорректными данными (только `POST /signal`) |
+    | 503 | `market_data_unavailable` | Поставщик не ответил за отведённое время (только `POST /signal`) |
+
+    Ошибки выполнения задания не возвращаются HTTP-кодом: задание переходит в `failed`,
+    а код и описание лежат в поле `error` задания (схема `JobError`).
+
+    ## Ограничения входных данных
+
+    | Что | Ограничение | Ответ при нарушении |
+    |---|---|---|
+    | Тело запроса | Не больше 64 КиБ; проверяется до разбора JSON | `413 payload_too_large` |
+    | Неизвестные поля | Запрещены в запросе и в `params` | `422 invalid_params`, `reason: unknown_field` |
+    | `ticker` | Инструмент из `GET /instruments` | `422 invalid_params`, `reason: unknown_ticker` |
+    | `period` | `start` раньше `end`, `end` не позже текущей даты, длина не больше 3653 дней | `422 invalid_params` |
+    | `initial_capital` | От 1000.00 до 1000000000.00 | `422 invalid_params`, `reason: out_of_range` |
+    | `commission_rate` | От 0 до 0.05 | `422 invalid_params`, `reason: out_of_range` |
+    | `history_window_bars` | От 1 до 5000 и не меньше `required_bars` стратегии | `422 invalid_params` |
+    | `strategies` в сравнении | От 1 до 5 без повторов, базовая линия добавляется сверх | `422 invalid_params` |
+    | `limit` в списке | От 1 до 100, по умолчанию 20 | `422 invalid_params` |
+    | Активные задания клиента | Не больше 20 в `queued` и `running` | `429 too_many_active_jobs` |
+
+    Размер ответа ограничен длиной периода: не больше 3653 дней — около 2600 точек кривой капитала.
+
+    ## Снимки данных и воспроизводимость
+
+    Бэктест выполняется на неизменяемом снимке свечей (`snapshot_id`). Снимок фиксируется при выполнении
+    задания, а для `POST /signal` — при расчёте сигнала. Его идентификатор возвращается в задании, результате
+    и сигнале.
+
+    - Повторный запуск (`POST /jobs/{job_id}/rerun`) копирует нормализованные параметры и `snapshot_id`
+      исходного задания, поэтому на том же снимке метрики и сделки совпадают.
+    - `POST /jobs` принимает необязательный `snapshot_id`: так новую стратегию проверяют на данных
+      прежнего запуска. Снимок должен существовать, относиться к тому же тикеру и покрывать период.
+    - Все задания одного сравнения (`POST /comparisons`) используют один снимок. Если `snapshot_id` не передан,
+      снимок фиксируется один раз для всего сравнения, когда выполняется первое из его заданий.
+
+    ## Внешний поставщик данных
+
+    Свечи загружаются из MOEX ISS через адаптер с таймаутом и ограниченным числом повторов временных отказов.
+    - В задании: недоступность поставщика переводит задание в `failed` с кодом `market_data_unavailable`,
+      ответ с битыми данными или изменённым форматом — в `failed` с `invalid_market_data`.
+      Остальные задания продолжают работу.
+    - В `POST /signal`: сервер ждёт данные не дольше 30 секунд с момента получения запроса, затем отвечает
+      `503 market_data_unavailable` с заголовком `Retry-After`. Некорректный ответ поставщика —
+      `502 invalid_market_data`. Если в кеше есть снимок с последним закрытым торговым днём, поставщик
+      не вызывается.
+
+    ## Перезапуск сервера
+
+    Задания и очередь хранятся в БД, поэтому перезапуск API их не затрагивает. Если перезапустился worker,
+    задание в `running` после истечения аренды (до 40 секунд) переходит в `failed` с кодом `worker_lost`
+    и `retryable: true`. Автоматического повтора нет: клиент запускает задание заново через `rerun`.
+    Подробно — ADR 0001.
+  license:
+    name: MIT
+    identifier: MIT
+
+servers:
+  - url: http://localhost:8000
+    description: Локальный запуск через docker compose
+
+security:
+  - ApiKeyAuth: []
+
+tags:
+  - name: Catalog
+    description: Каталог стратегий и инструментов
+  - name: Jobs
+    description: Задания на бэктест, их состояние, результат, отмена, история и повторный запуск
+  - name: Comparisons
+    description: Сравнение нескольких стратегий на одном инструменте и одном снимке данных
+  - name: Signal
+    description: Текущий сигнал стратегии на последних закрытых барах
+  - name: Service
+    description: Служебные операции
+
+paths:
+  /strategies:
+    get:
+      tags: [Catalog]
+      operationId: listStrategies
+      summary: Каталог стратегий
+      description: Стратегии из Registry с версией и схемой параметров. Неизвестное имя стратегии в других операциях даёт `422 unknown_operation` со списком отсюда.
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Список стратегий
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/X-Correlation-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StrategyList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /instruments:
+    get:
+      tags: [Catalog]
+      operationId: listInstruments
+      summary: Инструменты MVP
+      description: Тикеры, для которых можно запускать бэктест и запрашивать сигнал. Тикер в запросах проверяется по этому списку без обращения к поставщику данных.
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Список инструментов
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/X-Correlation-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InstrumentList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /jobs:
+    post:
+      tags: [Jobs]
+      operationId: createJob
+      summary: Создать задание на бэктест
+      description: |
+        Проверяет запрос и ставит задание в очередь. Порядок обработки:
+        1. `X-API-Key`, размер тела, разбор JSON, формат `Idempotency-Key`.
+        2. Поиск ключа идемпотентности клиента. Найден с тем же запросом — `200` с тем же заданием в текущем
+           состоянии, без повторной проверки и без лимитов. Найден с другим запросом — `409 idempotency_key_reused`.
+        3. Проверка полей и параметров стратегии (`422`), лимит активных заданий (`429`). Отказ не занимает ключ.
+        4. Одна транзакция: ключ, задание в `queued`, история состояний. Ответ `202`.
+
+        Сценарии С1 и С5. Двойной клик и потерянный ответ закрываются повтором с тем же ключом.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateJobRequest'
+            examples:
+              smaCrossover:
+                summary: SMA(20/50) за 3 года с комиссией 0,05%
+                value:
+                  ticker: EXMPL
+                  strategy: sma_crossover
+                  params: {fast: 20, slow: 50}
+                  period: {start: '2022-01-01', end: '2025-01-01'}
+                  initial_capital: '100000.00'
+                  commission_rate: '0.0005'
+      responses:
+        '202':
+          description: Задание создано и поставлено в очередь
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+            X-Correlation-ID:
+              $ref: '#/components/headers/X-Correlation-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+              examples:
+                queued:
+                  $ref: '#/components/examples/JobQueued'
+        '200':
+          description: Повтор с тем же ключом и тем же запросом — то же задание в текущем состоянии
+          headers:
+            Idempotent-Replayed:
+              $ref: '#/components/headers/Idempotent-Replayed'
+            X-Correlation-ID:
+              $ref: '#/components/headers/X-Correlation-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+              examples:
+                replayed:
+                  $ref: '#/components/examples/JobRunning'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/IdempotencyKeyReused'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/TooManyActiveJobs'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    get:
+      tags: [Jobs]
+      operationId: listJobs
+      summary: История запусков
+      description: Задания клиента от новых к старым, с фильтрами и постраничной выдачей по курсору. Сценарий С4. Чужие задания в выдачу не попадают.
+      parameters:
+        - name: ticker
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/Ticker'
+        - name: strategy
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/StrategyName'
+        - name: state
+          in: query
+          required: false
+          description: Одно или несколько состояний, например `?state=failed&state=canceled`.
+          style: form
+          explode: true
+          schema:
+            type: array
+            maxItems: 6
+            uniqueItems: true
+            items:
+              $ref: '#/components/schemas/JobState'
+        - name: created_from
+          in: query
+          required: false
+          description: Задания, созданные не раньше этого момента.
+          schema:
+            type: string
+            format: date-time
+        - name: created_to
+          in: query
+          required: false
+          description: Задания, созданные раньше этого момента.
+          schema:
+            type: string
+            format: date-time
+        - name: comparison_id
+          in: query
+          required: false
+          description: Только задания указанного сравнения.
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Страница списка заданий
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/X-Correlation-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /jobs/{job_id}:
+    get:
+      tags: [Jobs]
+      operationId: getJob
+      summary: Карточка задания
+      description: Состояние, параметры, снимок данных, ошибка и история переходов. Задание в `failed` после перезапуска worker содержит `error.code = worker_lost`.
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Задание
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/X-Correlation-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+              examples:
+                running:
+                  $ref: '#/components/examples/JobRunning'
+                failedWorkerLost:
+                  $ref: '#/components/examples/JobFailedWorkerLost'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/JobNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /jobs/{job_id}/result:
+    get:
+      tags: [Jobs]
+      operationId: getJobResult
+      summary: Результат бэктеста
+      description: Метрики, кривая капитала и сделки. Есть только у задания в `completed`; результат неизменен.
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Результат завершённого задания
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/X-Correlation-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BacktestResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/JobNotFound'
+        '409':
+          description: Результата нет — задание ещё выполняется или завершилось без результата
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/X-Correlation-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                notReady:
+                  $ref: '#/components/examples/ErrorResultNotReady'
+                notAvailable:
+                  $ref: '#/components/examples/ErrorResultNotAvailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /jobs/{job_id}/cancel:
+    post:
+      tags: [Jobs]
+      operationId: cancelJob
+      summary: Отменить задание
+      description: |
+        Переводит задание из `queued` или `running` в `canceled` сразу, не дожидаясь worker.
+        Частичная работа отбрасывается: у отменённого задания нет метрик и сделок, поздний результат worker
+        не сохраняется. Если задание успело завершиться раньше, отмена получает `409` с фактическим состоянием.
+        Отмена задания в любом терминальном состоянии, включая уже отменённое, — `409 job_state_conflict`;
+        `current_state: canceled` в ответе означает, что цель достигнута. Тела запроса нет.
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Задание отменено
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/X-Correlation-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+              examples:
+                canceled:
+                  $ref: '#/components/examples/JobCanceled'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/JobNotFound'
+        '409':
+          description: Задание уже в терминальном состоянии
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/X-Correlation-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                alreadyCompleted:
+                  $ref: '#/components/examples/ErrorCancelCompleted'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /jobs/{job_id}/rerun:
+    post:
+      tags: [Jobs]
+      operationId: rerunJob
+      summary: Повторить запуск
+      description: |
+        Создаёт **новое** задание с нормализованными параметрами и `snapshot_id` исходного; в новом задании
+        `rerun_of` указывает на исходное. Исходное задание, его история, результат и ошибка не меняются.
+        Если у исходного задания снимка нет (упало до загрузки данных или отменено), новое задание загрузит
+        данные заново.
+
+        Повторить можно только задание в терминальном состоянии (`completed`, `failed`, `canceled`):
+        для `queued` и `running` — `409 job_state_conflict`. Стратегии исходного задания больше нет
+        в каталоге — новое задание перейдёт в `failed` с кодом `strategy_unavailable`.
+        Тела запроса нет; ключ идемпотентности обязателен, как при создании.
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '202':
+          description: Новое задание создано и поставлено в очередь
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+            X-Correlation-ID:
+              $ref: '#/components/headers/X-Correlation-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+              examples:
+                rerun:
+                  $ref: '#/components/examples/JobRerunQueued'
+        '200':
+          description: Повтор с тем же ключом — то же новое задание в текущем состоянии
+          headers:
+            Idempotent-Replayed:
+              $ref: '#/components/headers/Idempotent-Replayed'
+            X-Correlation-ID:
+              $ref: '#/components/headers/X-Correlation-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/JobNotFound'
+        '409':
+          description: Исходное задание ещё не завершено или ключ уже использован для другого запроса
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/X-Correlation-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                notFinished:
+                  $ref: '#/components/examples/ErrorRerunNotFinished'
+                keyReused:
+                  $ref: '#/components/examples/ErrorIdempotencyKeyReused'
+        '429':
+          $ref: '#/components/responses/TooManyActiveJobs'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /comparisons:
+    post:
+      tags: [Comparisons]
+      operationId: createComparison
+      summary: Сравнить стратегии на одном инструменте
+      description: |
+        Создаёт по заданию на каждую стратегию и задание базовой линии `buy_and_hold`, если её нет в списке.
+        Все задания используют один инструмент, период, капитал, комиссию и один снимок данных (сценарий С3).
+        Задания создаются одной транзакцией вместе с ключом идемпотентности: либо все, либо ни одного.
+        Лимит активных заданий учитывает все задания сравнения. Отменить сравнение — отменить его задания
+        через `POST /jobs/{job_id}/cancel`.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateComparisonRequest'
+            examples:
+              twoSmaConfigs:
+                summary: Две настройки SMA crossover; базовая линия добавляется автоматически
+                value:
+                  ticker: EXMPL
+                  period: {start: '2022-01-01', end: '2025-01-01'}
+                  initial_capital: '100000.00'
+                  commission_rate: '0.0005'
+                  strategies:
+                    - strategy: sma_crossover
+                      params: {fast: 20, slow: 50}
+                    - strategy: sma_crossover
+                      params: {fast: 10, slow: 30}
+      responses:
+        '202':
+          description: Сравнение создано, задания в очереди
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+            X-Correlation-ID:
+              $ref: '#/components/headers/X-Correlation-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Comparison'
+        '200':
+          description: Повтор с тем же ключом и тем же запросом — то же сравнение в текущем состоянии
+          headers:
+            Idempotent-Replayed:
+              $ref: '#/components/headers/Idempotent-Replayed'
+            X-Correlation-ID:
+              $ref: '#/components/headers/X-Correlation-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Comparison'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/IdempotencyKeyReused'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/TooManyActiveJobs'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /comparisons/{comparison_id}:
+    get:
+      tags: [Comparisons]
+      operationId: getComparison
+      summary: Сводная таблица сравнения
+      description: Состояние каждого задания сравнения и его метрики после завершения. Сравнение в состоянии `done`, когда все его задания в терминальных состояниях.
+      parameters:
+        - name: comparison_id
+          in: path
+          required: true
+          description: Идентификатор сравнения. Сравнение другого клиента и несуществующий id дают одинаковый `404`.
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Сравнение
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/X-Correlation-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Comparison'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Сравнения нет или оно принадлежит другому клиенту
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/X-Correlation-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                notFound:
+                  $ref: '#/components/examples/ErrorComparisonNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /signal:
+    post:
+      tags: [Signal]
+      operationId: getCurrentSignal
+      summary: Текущий сигнал стратегии
+      description: |
+        Синхронно проигрывает последние `history_window_bars` закрытых свечей от позиции `flat` и возвращает
+        сигнал последнего бара с обоснованием (сценарий С2). Задание не создаётся, состояние сервера не меняется,
+        кроме кеша снимков, поэтому повтор безопасен и ключ идемпотентности не нужен.
+
+        В ответе всегда есть время последнего использованного бара (`bar_time`) и время расчёта
+        (`generated_at`): данные дневные и не выдаются за поток реального времени. Сигнал стратегии
+        не является индивидуальной инвестиционной рекомендацией.
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SignalRequest'
+            examples:
+              sma:
+                value:
+                  ticker: EXMPL
+                  strategy: sma_crossover
+                  params: {fast: 20, slow: 50}
+      responses:
+        '200':
+          description: Сигнал на последнем закрытом баре
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/X-Correlation-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignalResponse'
+              examples:
+                buy:
+                  $ref: '#/components/examples/SignalBuy'
+                insufficientData:
+                  $ref: '#/components/examples/SignalInsufficientData'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          description: Поставщик данных ответил некорректно — дубли, неположительные цены, неверный OHLC или изменённый формат ответа
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/X-Correlation-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                invalidMarketData:
+                  $ref: '#/components/examples/ErrorInvalidMarketData'
+        '503':
+          description: Поставщик данных не ответил за 30 секунд с учётом повторов
+          headers:
+            Retry-After:
+              $ref: '#/components/headers/Retry-After'
+            X-Correlation-ID:
+              $ref: '#/components/headers/X-Correlation-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                unavailable:
+                  $ref: '#/components/examples/ErrorMarketDataUnavailable'
+
+  /health:
+    get:
+      tags: [Service]
+      operationId: getHealth
+      summary: Проверка живости
+      description: Проверяет доступность БД. Не требует ключа и не раскрывает данных клиентов. Доступность поставщика данных не проверяется — его сбой не делает сервис неработающим.
+      security: []
+      responses:
+        '200':
+          description: Сервис и БД доступны
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+              example:
+                status: ok
+                checks: {database: ok}
+        '503':
+          description: БД недоступна
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+              example:
+                status: unavailable
+                checks: {database: unavailable}
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: Ключ клиента из конфигурации сервера. Определяет владельца заданий, сравнений и ключей идемпотентности.
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        Ключ идемпотентности, который клиент создаёт один раз на действие пользователя и передаёт при каждом
+        повторе этого действия. Рекомендуется UUID v4. Действует 24 часа в пределах клиента. Подробно — ADR 0002.
+        Нет заголовка — `400 missing_idempotency_key`, неверный формат — `400 invalid_idempotency_key`.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 64
+        pattern: '^[A-Za-z0-9_-]{1,64}$'
+      example: 3f8e2a5c-6b1d-4f7e-9a2b-1c4d5e6f7a8b
+    CorrelationId:
+      name: X-Correlation-ID
+      in: header
+      required: false
+      description: Идентификатор для сквозной трассировки. Не передан или не соответствует формату — сервер создаёт новый.
+      schema:
+        type: string
+        maxLength: 64
+        pattern: '^[A-Za-z0-9-]{1,64}$'
+    JobId:
+      name: job_id
+      in: path
+      required: true
+      description: Идентификатор задания. Задание другого клиента, несуществующий id и id не в формате UUID дают одинаковый `404 job_not_found`.
+      schema:
+        type: string
+        format: uuid
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Размер страницы.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: Непрозрачный курсор из `next_cursor` предыдущей страницы. Неверный курсор — `422 invalid_params` с полем `cursor`.
+      schema:
+        type: string
+        maxLength: 256
+
+  headers:
+    X-Correlation-ID:
+      description: Идентификатор запроса; тот же, что в `error.correlation_id` и в логах.
+      schema:
+        type: string
+    Location:
+      description: Адрес созданного ресурса, например `/jobs/{job_id}`.
+      schema:
+        type: string
+    Idempotent-Replayed:
+      description: '`true`, если ответ — повтор ранее выполненного запроса с тем же ключом идемпотентности.'
+      schema:
+        type: string
+        enum: ['true']
+    Retry-After:
+      description: Через сколько секунд имеет смысл повторить запрос.
+      schema:
+        type: integer
+        minimum: 1
+
+  schemas:
+    Decimal:
+      type: string
+      description: Десятичное число строкой, чтобы не терять точность денежных расчётов. Число JSON вместо строки — `invalid_params` с причиной `wrong_type`.
+      pattern: '^-?(0|[1-9][0-9]{0,17})(\.[0-9]{1,10})?$'
+      examples: ['100000.00', '0.0005', '-0.1280']
+    Ticker:
+      type: string
+      description: Тикер из `GET /instruments`. Регистр не важен, сервер приводит к верхнему.
+      pattern: '^[A-Za-z0-9]{1,12}$'
+      examples: [EXMPL]
+    StrategyName:
+      type: string
+      description: Имя стратегии из `GET /strategies`.
+      pattern: '^[a-z][a-z0-9_]{0,63}$'
+      examples: [sma_crossover]
+    StrategyParams:
+      type: object
+      description: |
+        Параметры выбранной стратегии. Проверяются по `params_schema` стратегии из `GET /strategies`
+        (`validate_params` в `docs/tool-contract.md`): типы без приведения (строка `"20"` вместо `20` —
+        `wrong_type`), диапазоны, связи полей, неизвестные ключи запрещены. Пропущенные поля получают
+        значения по умолчанию. В ответах — нормализованные параметры со всеми полями.
+      maxProperties: 20
+      additionalProperties: true
+      examples:
+        - {fast: 20, slow: 50}
+    Period:
+      type: object
+      description: Период бэктеста, даты включительно. `start` раньше `end`, `end` не позже текущей даты по Москве, длина не больше 3653 дней.
+      additionalProperties: false
+      required: [start, end]
+      properties:
+        start:
+          type: string
+          format: date
+        end:
+          type: string
+          format: date
+    StrategyRef:
+      type: object
+      required: [name, version]
+      properties:
+        name:
+          $ref: '#/components/schemas/StrategyName'
+        version:
+          type: string
+          description: Версия стратегии из Registry, фиксируется при создании задания.
+          examples: ['1.0.0']
+
+    CreateJobRequest:
+      type: object
+      additionalProperties: false
+      required: [ticker, strategy, period]
+      properties:
+        ticker:
+          $ref: '#/components/schemas/Ticker'
+        strategy:
+          $ref: '#/components/schemas/StrategyName'
+        params:
+          $ref: '#/components/schemas/StrategyParams'
+        period:
+          $ref: '#/components/schemas/Period'
+        initial_capital:
+          allOf:
+            - $ref: '#/components/schemas/Decimal'
+          description: Начальный капитал в валюте инструмента, от 1000.00 до 1000000000.00.
+          default: '100000.00'
+        commission_rate:
+          allOf:
+            - $ref: '#/components/schemas/Decimal'
+          description: Комиссия — доля оборота сделки, от 0 до 0.05.
+          default: '0.0005'
+        snapshot_id:
+          type: string
+          format: uuid
+          description: |
+            Необязательный снимок данных прежнего запуска. Должен существовать (`reason: not_found`),
+            относиться к тому же тикеру (`ticker_mismatch`) и покрывать период (`period_not_covered`).
+            Не задан — снимок фиксируется при выполнении.
+
+    ComparisonStrategy:
+      type: object
+      additionalProperties: false
+      required: [strategy]
+      properties:
+        strategy:
+          $ref: '#/components/schemas/StrategyName'
+        params:
+          $ref: '#/components/schemas/StrategyParams'
+
+    CreateComparisonRequest:
+      type: object
+      additionalProperties: false
+      required: [ticker, period, strategies]
+      properties:
+        ticker:
+          $ref: '#/components/schemas/Ticker'
+        period:
+          $ref: '#/components/schemas/Period'
+        initial_capital:
+          allOf:
+            - $ref: '#/components/schemas/Decimal'
+          description: Общий для всех заданий сравнения, от 1000.00 до 1000000000.00.
+          default: '100000.00'
+        commission_rate:
+          allOf:
+            - $ref: '#/components/schemas/Decimal'
+          description: Общая для всех заданий сравнения, от 0 до 0.05.
+          default: '0.0005'
+        snapshot_id:
+          type: string
+          format: uuid
+          description: Необязательный снимок прежнего запуска; те же проверки, что в `CreateJobRequest`.
+        strategies:
+          type: array
+          description: |
+            От 1 до 5 стратегий без повторов одной стратегии с одинаковыми нормализованными параметрами
+            (`reason: duplicate`). `buy_and_hold` добавляется как базовая линия сверх списка, если его нет.
+          minItems: 1
+          maxItems: 5
+          items:
+            $ref: '#/components/schemas/ComparisonStrategy'
+
+    SignalRequest:
+      type: object
+      additionalProperties: false
+      required: [ticker, strategy]
+      properties:
+        ticker:
+          $ref: '#/components/schemas/Ticker'
+        strategy:
+          $ref: '#/components/schemas/StrategyName'
+        params:
+          $ref: '#/components/schemas/StrategyParams'
+        history_window_bars:
+          type: integer
+          description: Число последних закрытых свечей. Меньше `required_bars` стратегии — `invalid_params` с причиной `less_than_required_bars`.
+          minimum: 1
+          maximum: 5000
+          default: 252
+        initial_capital:
+          allOf:
+            - $ref: '#/components/schemas/Decimal'
+          default: '100000.00'
+        commission_rate:
+          allOf:
+            - $ref: '#/components/schemas/Decimal'
+          default: '0.0005'
+
+    JobState:
+      type: string
+      description: |
+        Состояние задания (`docs/architecture.md`, раздел 3). `completed`, `failed`, `canceled` — терминальные
+        и не меняются. `created` в MVP через API не наблюдается.
+      enum: [created, queued, running, completed, failed, canceled]
+
+    JobErrorCode:
+      type: string
+      description: |
+        Причина перехода задания в `failed`:
+        - `market_data_unavailable` — поставщик данных не ответил с учётом повторов;
+        - `invalid_market_data` — поставщик вернул некорректные данные или изменил формат ответа;
+        - `insufficient_data` — за период нет ни одного бара, пригодного для расчёта;
+        - `tool_failed` — стратегия завершилась исключением;
+        - `job_timeout` — превышен срок выполнения задания;
+        - `worker_lost` — worker пропал (перезапуск, сбой), аренда истекла;
+        - `strategy_unavailable` — стратегии нужной версии больше нет в каталоге;
+        - `snapshot_not_found` — снимок для повторного запуска не найден;
+        - `internal_error` — непредвиденная ошибка.
+      enum:
+        - market_data_unavailable
+        - invalid_market_data
+        - insufficient_data
+        - tool_failed
+        - job_timeout
+        - worker_lost
+        - strategy_unavailable
+        - snapshot_not_found
+        - internal_error
+
+    JobError:
+      type: object
+      required: [code, message, retryable]
+      properties:
+        code:
+          $ref: '#/components/schemas/JobErrorCode'
+        message:
+          type: string
+        retryable:
+          type: boolean
+          description: Есть ли смысл повторить запуск без изменений. `true` для `market_data_unavailable`, `job_timeout`, `worker_lost`, `internal_error`.
+        details:
+          type: object
+          additionalProperties: true
+
+    StateTransition:
+      type: object
+      required: [from_state, to_state, at, actor]
+      properties:
+        from_state:
+          oneOf:
+            - $ref: '#/components/schemas/JobState'
+            - type: 'null'
+        to_state:
+          $ref: '#/components/schemas/JobState'
+        at:
+          type: string
+          format: date-time
+          description: Время перехода по часам БД.
+        actor:
+          type: string
+          description: Кто выполнил переход.
+          enum: [user, worker, reaper]
+        reason:
+          type: [string, 'null']
+          description: Код причины для перехода в `failed`.
+
+    JobSummary:
+      type: object
+      required: [id, state, ticker, strategy, params, period, initial_capital, commission_rate, snapshot_id, rerun_of, comparison_id, error, created_at, started_at, finished_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        state:
+          $ref: '#/components/schemas/JobState'
+        ticker:
+          $ref: '#/components/schemas/Ticker'
+        strategy:
+          $ref: '#/components/schemas/StrategyRef'
+        params:
+          $ref: '#/components/schemas/StrategyParams'
+        period:
+          $ref: '#/components/schemas/Period'
+        initial_capital:
+          $ref: '#/components/schemas/Decimal'
+        commission_rate:
+          $ref: '#/components/schemas/Decimal'
+        snapshot_id:
+          type: [string, 'null']
+          format: uuid
+          description: Снимок данных задания. Задан при создании (`snapshot_id` в запросе, повторный запуск, сравнение с зафиксированным снимком) или после успешного завершения.
+        rerun_of:
+          type: [string, 'null']
+          format: uuid
+          description: Исходное задание, если это повторный запуск.
+        comparison_id:
+          type: [string, 'null']
+          format: uuid
+        error:
+          description: Причина неудачи; заполнено только в состоянии `failed`.
+          oneOf:
+            - $ref: '#/components/schemas/JobError'
+            - type: 'null'
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: [string, 'null']
+          format: date-time
+        finished_at:
+          type: [string, 'null']
+          format: date-time
+
+    Job:
+      allOf:
+        - $ref: '#/components/schemas/JobSummary'
+        - type: object
+          required: [status_history]
+          properties:
+            status_history:
+              type: array
+              description: Все переходы состояний по времени.
+              items:
+                $ref: '#/components/schemas/StateTransition'
+
+    JobList:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/JobSummary'
+        next_cursor:
+          type: [string, 'null']
+          description: Курсор следующей страницы; `null` — страниц больше нет.
+
+    Metrics:
+      type: object
+      description: Доли записаны десятичными строками (`0.3420` = 34,2%). Метрики сделок считаются по закрытым позициям (покупка и продажа).
+      required: [total_return, buy_and_hold_return, max_drawdown, sharpe_ratio, final_equity, trades_count, closed_positions_count, win_rate, avg_position_return]
+      properties:
+        total_return:
+          $ref: '#/components/schemas/Decimal'
+        buy_and_hold_return:
+          $ref: '#/components/schemas/Decimal'
+        max_drawdown:
+          allOf:
+            - $ref: '#/components/schemas/Decimal'
+          description: Наибольшее падение капитала от пика, неположительная доля.
+        sharpe_ratio:
+          description: Годовой коэффициент Шарпа по дневной доходности, 252 торговых дня, безрисковая ставка 0. `null`, если доходность не менялась.
+          oneOf:
+            - $ref: '#/components/schemas/Decimal'
+            - type: 'null'
+        final_equity:
+          $ref: '#/components/schemas/Decimal'
+        trades_count:
+          type: integer
+          minimum: 0
+          description: Исполненные сделки — покупки и продажи.
+        closed_positions_count:
+          type: integer
+          minimum: 0
+        win_rate:
+          description: Доля прибыльных закрытых позиций; `null`, если закрытых нет.
+          oneOf:
+            - $ref: '#/components/schemas/Decimal'
+            - type: 'null'
+        avg_position_return:
+          description: Средний результат закрытой позиции с учётом комиссий; `null`, если закрытых нет.
+          oneOf:
+            - $ref: '#/components/schemas/Decimal'
+            - type: 'null'
+
+    Trade:
+      type: object
+      description: Исполненная сделка. Сигнал на баре `signal_date` исполняется по `open` следующего торгового бара `execution_date`.
+      required: [side, signal_date, execution_date, price, quantity, commission, reason, pnl]
+      properties:
+        side:
+          type: string
+          enum: [BUY, SELL]
+        signal_date:
+          type: string
+          format: date
+        execution_date:
+          type: string
+          format: date
+        price:
+          $ref: '#/components/schemas/Decimal'
+        quantity:
+          type: integer
+          minimum: 1
+          description: Число акций, кратное лоту.
+        commission:
+          $ref: '#/components/schemas/Decimal'
+        reason:
+          $ref: '#/components/schemas/Reason'
+        pnl:
+          description: Результат закрытой позиции с учётом комиссий; только у `SELL`.
+          oneOf:
+            - $ref: '#/components/schemas/Decimal'
+            - type: 'null'
+
+    EquityPoint:
+      type: object
+      required: [date, equity]
+      properties:
+        date:
+          type: string
+          format: date
+        equity:
+          $ref: '#/components/schemas/Decimal'
+
+    BacktestResult:
+      type: object
+      required: [job_id, snapshot_id, data_as_of, strategy, engine_version, params, period, metrics, final_position, equity_curve, trades]
+      properties:
+        job_id:
+          type: string
+          format: uuid
+        snapshot_id:
+          type: string
+          format: uuid
+        data_as_of:
+          type: string
+          format: date
+          description: Дата последнего закрытого бара в снимке.
+        strategy:
+          $ref: '#/components/schemas/StrategyRef'
+        engine_version:
+          type: string
+        params:
+          $ref: '#/components/schemas/StrategyParams'
+        period:
+          $ref: '#/components/schemas/Period'
+        metrics:
+          $ref: '#/components/schemas/Metrics'
+        final_position:
+          $ref: '#/components/schemas/Position'
+        equity_curve:
+          type: array
+          description: Капитал на закрытии каждого торгового дня периода; открытая позиция оценивается по `close`.
+          maxItems: 3700
+          items:
+            $ref: '#/components/schemas/EquityPoint'
+        trades:
+          type: array
+          items:
+            $ref: '#/components/schemas/Trade'
+
+    Position:
+      type: string
+      description: Позиция движка — без позиции или длинная.
+      enum: [flat, long]
+
+    Reason:
+      type: object
+      description: Сработавшее правило стратегии (`docs/tool-contract.md`).
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          examples: [cross_up]
+        message:
+          type: string
+
+    SignalValue:
+      type: string
+      description: '`INSUFFICIENT_DATA` — истории меньше `required_bars`, торгового сигнала нет.'
+      enum: [BUY, SELL, HOLD, INSUFFICIENT_DATA]
+
+    SignalResponse:
+      type: object
+      required: [ticker, strategy, params, signal, position, reason, indicators, bar_time, generated_at, history_window_bars, bars_used, snapshot_id]
+      properties:
+        ticker:
+          $ref: '#/components/schemas/Ticker'
+        strategy:
+          $ref: '#/components/schemas/StrategyRef'
+        params:
+          $ref: '#/components/schemas/StrategyParams'
+        signal:
+          $ref: '#/components/schemas/SignalValue'
+        position:
+          allOf:
+            - $ref: '#/components/schemas/Position'
+          description: Позиция после проигрывания окна, до исполнения текущего сигнала.
+        reason:
+          $ref: '#/components/schemas/Reason'
+        indicators:
+          type: object
+          description: Значения индикаторов на последнем баре; недоступные — `null`.
+          additionalProperties:
+            oneOf:
+              - $ref: '#/components/schemas/Decimal'
+              - type: 'null'
+        bar_time:
+          type: [string, 'null']
+          format: date-time
+          description: Время закрытия последнего использованного бара; `null`, если история пуста.
+        generated_at:
+          type: string
+          format: date-time
+          description: Время расчёта сигнала.
+        history_window_bars:
+          type: integer
+        bars_used:
+          type: integer
+          minimum: 0
+          description: Сколько закрытых баров реально было в окне.
+        snapshot_id:
+          type: string
+          format: uuid
+
+    ComparisonItem:
+      type: object
+      required: [job_id, strategy, params, is_baseline, state, metrics, error]
+      properties:
+        job_id:
+          type: string
+          format: uuid
+        strategy:
+          $ref: '#/components/schemas/StrategyRef'
+        params:
+          $ref: '#/components/schemas/StrategyParams'
+        is_baseline:
+          type: boolean
+          description: '`true` у задания базовой линии `buy_and_hold`.'
+        state:
+          $ref: '#/components/schemas/JobState'
+        metrics:
+          description: Метрики задания в `completed`, иначе `null`.
+          oneOf:
+            - $ref: '#/components/schemas/Metrics'
+            - type: 'null'
+        error:
+          oneOf:
+            - $ref: '#/components/schemas/JobError'
+            - type: 'null'
+
+    Comparison:
+      type: object
+      required: [id, state, ticker, period, initial_capital, commission_rate, snapshot_id, created_at, items]
+      properties:
+        id:
+          type: string
+          format: uuid
+        state:
+          type: string
+          description: '`done`, когда все задания сравнения в терминальных состояниях.'
+          enum: [in_progress, done]
+        ticker:
+          $ref: '#/components/schemas/Ticker'
+        period:
+          $ref: '#/components/schemas/Period'
+        initial_capital:
+          $ref: '#/components/schemas/Decimal'
+        commission_rate:
+          $ref: '#/components/schemas/Decimal'
+        snapshot_id:
+          type: [string, 'null']
+          format: uuid
+          description: Общий снимок всех заданий; `null`, пока ни одно задание не зафиксировало снимок.
+        created_at:
+          type: string
+          format: date-time
+        items:
+          type: array
+          description: Строки сводной таблицы — по одной на задание, включая базовую линию.
+          items:
+            $ref: '#/components/schemas/ComparisonItem'
+
+    Strategy:
+      type: object
+      required: [name, version, title, description, params_schema, required_bars]
+      properties:
+        name:
+          $ref: '#/components/schemas/StrategyName'
+        version:
+          type: string
+        title:
+          type: string
+        description:
+          type: string
+        params_schema:
+          type: object
+          description: JSON Schema параметров со значениями по умолчанию и диапазонами.
+          additionalProperties: true
+        required_bars:
+          type: string
+          description: Минимум закрытых баров для сигнала, например `slow + 1`.
+
+    StrategyList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Strategy'
+      example:
+        items:
+          - name: sma_crossover
+            version: 1.0.0
+            title: Пересечение скользящих средних
+            description: BUY при пересечении SMA fast снизу вверх через SMA slow, SELL — сверху вниз.
+            params_schema:
+              type: object
+              additionalProperties: false
+              properties:
+                fast: {type: integer, minimum: 1, maximum: 499, default: 20}
+                slow: {type: integer, minimum: 2, maximum: 500, default: 50}
+            required_bars: slow + 1
+          - name: buy_and_hold
+            version: 1.0.0
+            title: Купить и держать
+            description: Базовая линия — покупка на первом доступном баре и удержание.
+            params_schema: {type: object, additionalProperties: false, properties: {}}
+            required_bars: '1'
+
+    Instrument:
+      type: object
+      required: [ticker, name, board, currency, lot_size]
+      properties:
+        ticker:
+          $ref: '#/components/schemas/Ticker'
+        name:
+          type: string
+        board:
+          type: string
+          description: Режим торгов MOEX.
+        currency:
+          type: string
+        lot_size:
+          type: integer
+          minimum: 1
+
+    InstrumentList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Instrument'
+      example:
+        items:
+          - {ticker: EXMPL, name: ПАО «Пример», board: TQBR, currency: RUB, lot_size: 10}
+
+    Health:
+      type: object
+      required: [status, checks]
+      properties:
+        status:
+          type: string
+          enum: [ok, unavailable]
+        checks:
+          type: object
+          required: [database]
+          properties:
+            database:
+              type: string
+              enum: [ok, unavailable]
+
+    ErrorCode:
+      type: string
+      description: Машиночитаемый код ошибки; соответствие HTTP-статусам — в описании API.
+      enum:
+        - malformed_request
+        - missing_idempotency_key
+        - invalid_idempotency_key
+        - unauthorized
+        - not_found
+        - job_not_found
+        - comparison_not_found
+        - method_not_allowed
+        - idempotency_key_reused
+        - job_state_conflict
+        - result_not_ready
+        - result_not_available
+        - payload_too_large
+        - invalid_params
+        - unknown_operation
+        - too_many_active_jobs
+        - internal_error
+        - invalid_market_data
+        - market_data_unavailable
+
+    Allowed:
+      type: object
+      description: Допустимые значения поля — перечень или границы диапазона.
+      properties:
+        values:
+          type: array
+          items:
+            type: string
+        min:
+          type: [number, string]
+        max:
+          type: [number, string]
+
+    ErrorDetails:
+      type: object
+      description: Поля зависят от `code`; неизвестные поля клиент игнорирует.
+      additionalProperties: true
+      properties:
+        field:
+          type: string
+          description: Путь к проблемному полю или имя заголовка.
+        reason:
+          type: string
+        allowed:
+          $ref: '#/components/schemas/Allowed'
+        job_id:
+          type: string
+          format: uuid
+        current_state:
+          $ref: '#/components/schemas/JobState'
+        requested_state:
+          $ref: '#/components/schemas/JobState'
+        limit:
+          type: integer
+        retry_after_seconds:
+          type: integer
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, correlation_id]
+          properties:
+            code:
+              $ref: '#/components/schemas/ErrorCode'
+            message:
+              type: string
+            details:
+              $ref: '#/components/schemas/ErrorDetails'
+            correlation_id:
+              type: string
+
+  responses:
+    BadRequest:
+      description: Запрос не разобран или нет корректного ключа идемпотентности
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/X-Correlation-ID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            malformed:
+              $ref: '#/components/examples/ErrorMalformedRequest'
+            missingKey:
+              $ref: '#/components/examples/ErrorMissingIdempotencyKey'
+            invalidKey:
+              $ref: '#/components/examples/ErrorInvalidIdempotencyKey'
+    Unauthorized:
+      description: Нет ключа клиента или ключ неверный
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/X-Correlation-ID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            unauthorized:
+              $ref: '#/components/examples/ErrorUnauthorized'
+    JobNotFound:
+      description: Задания нет или оно принадлежит другому клиенту — ответы не различаются
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/X-Correlation-ID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            notFound:
+              $ref: '#/components/examples/ErrorJobNotFound'
+    IdempotencyKeyReused:
+      description: Ключ идемпотентности уже использован этим клиентом для другого запроса
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/X-Correlation-ID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            keyReused:
+              $ref: '#/components/examples/ErrorIdempotencyKeyReused'
+    PayloadTooLarge:
+      description: Тело запроса больше 64 КиБ; отклоняется до разбора JSON
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/X-Correlation-ID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            tooLarge:
+              $ref: '#/components/examples/ErrorPayloadTooLarge'
+    ValidationError:
+      description: Запрос не прошёл проверку; задание не создано
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/X-Correlation-ID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            unknownStrategy:
+              $ref: '#/components/examples/ErrorUnknownStrategy'
+            unknownTicker:
+              $ref: '#/components/examples/ErrorUnknownTicker'
+            missingField:
+              $ref: '#/components/examples/ErrorMissingField'
+            wrongType:
+              $ref: '#/components/examples/ErrorWrongType'
+            outOfRange:
+              $ref: '#/components/examples/ErrorOutOfRange'
+            fastNotLessThanSlow:
+              $ref: '#/components/examples/ErrorFastNotLessThanSlow'
+            periodOrder:
+              $ref: '#/components/examples/ErrorPeriodOrder'
+            periodTooLong:
+              $ref: '#/components/examples/ErrorPeriodTooLong'
+            unknownField:
+              $ref: '#/components/examples/ErrorUnknownField'
+    TooManyActiveJobs:
+      description: У клиента уже 20 заданий в `queued` и `running`; новое не создано, ключ не занят
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/Retry-After'
+        X-Correlation-ID:
+          $ref: '#/components/headers/X-Correlation-ID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            tooMany:
+              $ref: '#/components/examples/ErrorTooManyActiveJobs'
+    InternalError:
+      description: Непредвиденная ошибка сервера; подробности — в логах по `correlation_id`
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/X-Correlation-ID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            internal:
+              $ref: '#/components/examples/ErrorInternal'
+
+  examples:
+    JobQueued:
+      summary: Новое задание в очереди
+      value:
+        id: 8f1c2d3e-4a5b-4c6d-8e7f-9a0b1c2d3e4f
+        state: queued
+        ticker: EXMPL
+        strategy: {name: sma_crossover, version: 1.0.0}
+        params: {fast: 20, slow: 50}
+        period: {start: '2022-01-01', end: '2025-01-01'}
+        initial_capital: '100000.00'
+        commission_rate: '0.0005'
+        snapshot_id: null
+        rerun_of: null
+        comparison_id: null
+        error: null
+        created_at: '2026-11-14T10:00:00Z'
+        started_at: null
+        finished_at: null
+        status_history:
+          - {from_state: null, to_state: created, at: '2026-11-14T10:00:00Z', actor: user, reason: null}
+          - {from_state: created, to_state: queued, at: '2026-11-14T10:00:00Z', actor: user, reason: null}
+    JobRunning:
+      summary: Задание выполняется
+      value:
+        id: 8f1c2d3e-4a5b-4c6d-8e7f-9a0b1c2d3e4f
+        state: running
+        ticker: EXMPL
+        strategy: {name: sma_crossover, version: 1.0.0}
+        params: {fast: 20, slow: 50}
+        period: {start: '2022-01-01', end: '2025-01-01'}
+        initial_capital: '100000.00'
+        commission_rate: '0.0005'
+        snapshot_id: null
+        rerun_of: null
+        comparison_id: null
+        error: null
+        created_at: '2026-11-14T10:00:00Z'
+        started_at: '2026-11-14T10:00:01Z'
+        finished_at: null
+        status_history:
+          - {from_state: null, to_state: created, at: '2026-11-14T10:00:00Z', actor: user, reason: null}
+          - {from_state: created, to_state: queued, at: '2026-11-14T10:00:00Z', actor: user, reason: null}
+          - {from_state: queued, to_state: running, at: '2026-11-14T10:00:01Z', actor: worker, reason: null}
+    JobFailedWorkerLost:
+      summary: Worker перезапустился во время выполнения
+      value:
+        id: 8f1c2d3e-4a5b-4c6d-8e7f-9a0b1c2d3e4f
+        state: failed
+        ticker: EXMPL
+        strategy: {name: sma_crossover, version: 1.0.0}
+        params: {fast: 20, slow: 50}
+        period: {start: '2022-01-01', end: '2025-01-01'}
+        initial_capital: '100000.00'
+        commission_rate: '0.0005'
+        snapshot_id: null
+        rerun_of: null
+        comparison_id: null
+        error:
+          code: worker_lost
+          message: Исполнитель перестал продлевать аренду задания
+          retryable: true
+        created_at: '2026-11-14T10:00:00Z'
+        started_at: '2026-11-14T10:00:01Z'
+        finished_at: '2026-11-14T10:00:41Z'
+        status_history:
+          - {from_state: null, to_state: created, at: '2026-11-14T10:00:00Z', actor: user, reason: null}
+          - {from_state: created, to_state: queued, at: '2026-11-14T10:00:00Z', actor: user, reason: null}
+          - {from_state: queued, to_state: running, at: '2026-11-14T10:00:01Z', actor: worker, reason: null}
+          - {from_state: running, to_state: failed, at: '2026-11-14T10:00:41Z', actor: reaper, reason: worker_lost}
+    JobCanceled:
+      summary: Задание отменено во время выполнения
+      value:
+        id: 8f1c2d3e-4a5b-4c6d-8e7f-9a0b1c2d3e4f
+        state: canceled
+        ticker: EXMPL
+        strategy: {name: sma_crossover, version: 1.0.0}
+        params: {fast: 20, slow: 50}
+        period: {start: '2022-01-01', end: '2025-01-01'}
+        initial_capital: '100000.00'
+        commission_rate: '0.0005'
+        snapshot_id: null
+        rerun_of: null
+        comparison_id: null
+        error: null
+        created_at: '2026-11-14T10:00:00Z'
+        started_at: '2026-11-14T10:00:01Z'
+        finished_at: '2026-11-14T10:00:03Z'
+        status_history:
+          - {from_state: null, to_state: created, at: '2026-11-14T10:00:00Z', actor: user, reason: null}
+          - {from_state: created, to_state: queued, at: '2026-11-14T10:00:00Z', actor: user, reason: null}
+          - {from_state: queued, to_state: running, at: '2026-11-14T10:00:01Z', actor: worker, reason: null}
+          - {from_state: running, to_state: canceled, at: '2026-11-14T10:00:03Z', actor: user, reason: null}
+    JobRerunQueued:
+      summary: Повторный запуск завершённого задания на его снимке
+      value:
+        id: b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e
+        state: queued
+        ticker: EXMPL
+        strategy: {name: sma_crossover, version: 1.0.0}
+        params: {fast: 20, slow: 50}
+        period: {start: '2022-01-01', end: '2025-01-01'}
+        initial_capital: '100000.00'
+        commission_rate: '0.0005'
+        snapshot_id: 5d6e7f80-91a2-4b3c-8d4e-5f6a7b8c9d0e
+        rerun_of: 7e8f9a0b-1c2d-4e3f-8a4b-5c6d7e8f9a0b
+        comparison_id: null
+        error: null
+        created_at: '2026-11-14T11:00:00Z'
+        started_at: null
+        finished_at: null
+        status_history:
+          - {from_state: null, to_state: created, at: '2026-11-14T11:00:00Z', actor: user, reason: null}
+          - {from_state: created, to_state: queued, at: '2026-11-14T11:00:00Z', actor: user, reason: null}
+    SignalBuy:
+      summary: Пересечение SMA снизу вверх
+      value:
+        ticker: EXMPL
+        strategy: {name: sma_crossover, version: 1.0.0}
+        params: {fast: 20, slow: 50}
+        signal: BUY
+        position: flat
+        reason: {code: cross_up, message: SMA20 пересекла SMA50 снизу вверх на последнем закрытом баре}
+        indicators:
+          fast_previous: '311.20'
+          slow_previous: '311.45'
+          fast_current: '312.10'
+          slow_current: '311.80'
+        bar_time: '2026-11-13T18:50:00+03:00'
+        generated_at: '2026-11-14T10:05:00Z'
+        history_window_bars: 252
+        bars_used: 252
+        snapshot_id: 5d6e7f80-91a2-4b3c-8d4e-5f6a7b8c9d0e
+    SignalInsufficientData:
+      summary: История короче минимума стратегии
+      value:
+        ticker: EXMPL
+        strategy: {name: sma_crossover, version: 1.0.0}
+        params: {fast: 20, slow: 50}
+        signal: INSUFFICIENT_DATA
+        position: flat
+        reason: {code: insufficient_history, message: 'Нужно 51 закрытый бар, доступно 34'}
+        indicators:
+          fast_previous: null
+          slow_previous: null
+          fast_current: '98.40'
+          slow_current: null
+        bar_time: '2026-11-13T18:50:00+03:00'
+        generated_at: '2026-11-14T10:05:00Z'
+        history_window_bars: 252
+        bars_used: 34
+        snapshot_id: 6e7f8091-a2b3-4c4d-9e5f-6a7b8c9d0e1f
+    ErrorMalformedRequest:
+      summary: Тело не JSON
+      value:
+        error:
+          code: malformed_request
+          message: Тело запроса не является JSON-объектом
+          details: {field: body, reason: invalid_format}
+          correlation_id: c0a8012e-5f1d-4c2b-9e3a-7b6d8f9e0a11
+    ErrorMissingIdempotencyKey:
+      summary: Нет ключа идемпотентности
+      value:
+        error:
+          code: missing_idempotency_key
+          message: Заголовок Idempotency-Key обязателен для создания задания
+          details: {field: Idempotency-Key, reason: required}
+          correlation_id: c0a8012e-5f1d-4c2b-9e3a-7b6d8f9e0a11
+    ErrorInvalidIdempotencyKey:
+      summary: Ключ длиннее 64 символов
+      value:
+        error:
+          code: invalid_idempotency_key
+          message: Idempotency-Key — от 1 до 64 символов из A-Z, a-z, 0-9, _ и -
+          details: {field: Idempotency-Key, reason: invalid_format}
+          correlation_id: c0a8012e-5f1d-4c2b-9e3a-7b6d8f9e0a11
+    ErrorUnauthorized:
+      summary: Нет X-API-Key
+      value:
+        error:
+          code: unauthorized
+          message: Нужен ключ клиента в заголовке X-API-Key
+          correlation_id: c0a8012e-5f1d-4c2b-9e3a-7b6d8f9e0a11
+    ErrorJobNotFound:
+      summary: Задания нет или оно чужое
+      value:
+        error:
+          code: job_not_found
+          message: Задание не найдено
+          details: {job_id: 9a0b1c2d-3e4f-4a5b-8c6d-7e8f9a0b1c2d}
+          correlation_id: c0a8012e-5f1d-4c2b-9e3a-7b6d8f9e0a11
+    ErrorComparisonNotFound:
+      summary: Сравнения нет или оно чужое
+      value:
+        error:
+          code: comparison_not_found
+          message: Сравнение не найдено
+          correlation_id: c0a8012e-5f1d-4c2b-9e3a-7b6d8f9e0a11
+    ErrorIdempotencyKeyReused:
+      summary: Тот же ключ с другим телом
+      value:
+        error:
+          code: idempotency_key_reused
+          message: Ключ уже использован для другого запроса; для нового запроса нужен новый ключ
+          details: {field: Idempotency-Key, reason: different_request, job_id: 8f1c2d3e-4a5b-4c6d-8e7f-9a0b1c2d3e4f}
+          correlation_id: c0a8012e-5f1d-4c2b-9e3a-7b6d8f9e0a11
+    ErrorResultNotReady:
+      summary: Задание ещё выполняется
+      value:
+        error:
+          code: result_not_ready
+          message: Результат появится после завершения задания
+          details: {job_id: 8f1c2d3e-4a5b-4c6d-8e7f-9a0b1c2d3e4f, current_state: running}
+          correlation_id: c0a8012e-5f1d-4c2b-9e3a-7b6d8f9e0a11
+    ErrorResultNotAvailable:
+      summary: Задание завершилось ошибкой
+      value:
+        error:
+          code: result_not_available
+          message: Задание в состоянии failed, результата нет; причина — в поле error задания
+          details: {job_id: 8f1c2d3e-4a5b-4c6d-8e7f-9a0b1c2d3e4f, current_state: failed}
+          correlation_id: c0a8012e-5f1d-4c2b-9e3a-7b6d8f9e0a11
+    ErrorCancelCompleted:
+      summary: Отмена завершённого задания
+      value:
+        error:
+          code: job_state_conflict
+          message: Задание в состоянии completed нельзя отменить
+          details: {job_id: 8f1c2d3e-4a5b-4c6d-8e7f-9a0b1c2d3e4f, current_state: completed, requested_state: canceled}
+          correlation_id: c0a8012e-5f1d-4c2b-9e3a-7b6d8f9e0a11
+    ErrorRerunNotFinished:
+      summary: Повтор незавершённого задания
+      value:
+        error:
+          code: job_state_conflict
+          message: Повторить можно только завершённое, упавшее или отменённое задание
+          details: {job_id: 8f1c2d3e-4a5b-4c6d-8e7f-9a0b1c2d3e4f, current_state: running, reason: job_not_finished}
+          correlation_id: c0a8012e-5f1d-4c2b-9e3a-7b6d8f9e0a11
+    ErrorPayloadTooLarge:
+      summary: Тело больше лимита
+      value:
+        error:
+          code: payload_too_large
+          message: Тело запроса больше 65536 байт
+          details: {field: body, reason: too_large, allowed: {max: 65536}}
+          correlation_id: c0a8012e-5f1d-4c2b-9e3a-7b6d8f9e0a11
+    ErrorUnknownStrategy:
+      summary: Стратегии нет в каталоге
+      value:
+        error:
+          code: unknown_operation
+          message: Стратегия rsi_magic не найдена
+          details:
+            field: strategy
+            reason: not_found
+            allowed: {values: [sma_crossover, rsi_mean_reversion, breakout, buy_and_hold]}
+          correlation_id: c0a8012e-5f1d-4c2b-9e3a-7b6d8f9e0a11
+    ErrorUnknownTicker:
+      summary: Тикера нет в списке инструментов
+      value:
+        error:
+          code: invalid_params
+          message: Инструмент NOPE не поддерживается; список — GET /instruments
+          details: {field: ticker, reason: unknown_ticker}
+          correlation_id: c0a8012e-5f1d-4c2b-9e3a-7b6d8f9e0a11
+    ErrorMissingField:
+      summary: Не хватает поля
+      value:
+        error:
+          code: invalid_params
+          message: Поле period обязательно
+          details: {field: period, reason: required}
+          correlation_id: c0a8012e-5f1d-4c2b-9e3a-7b6d8f9e0a11
+    ErrorWrongType:
+      summary: Строка вместо целого числа
+      value:
+        error:
+          code: invalid_params
+          message: fast должен быть целым числом
+          details: {field: params.fast, reason: wrong_type}
+          correlation_id: c0a8012e-5f1d-4c2b-9e3a-7b6d8f9e0a11
+    ErrorOutOfRange:
+      summary: fast=0
+      value:
+        error:
+          code: invalid_params
+          message: fast должен быть от 1 до 499
+          details: {field: params.fast, reason: out_of_range, allowed: {min: 1, max: 499}}
+          correlation_id: c0a8012e-5f1d-4c2b-9e3a-7b6d8f9e0a11
+    ErrorFastNotLessThanSlow:
+      summary: fast не меньше slow
+      value:
+        error:
+          code: invalid_params
+          message: fast должен быть меньше slow
+          details: {field: params.fast, reason: must_be_less_than_slow}
+          correlation_id: c0a8012e-5f1d-4c2b-9e3a-7b6d8f9e0a11
+    ErrorPeriodOrder:
+      summary: Дата начала позже даты окончания
+      value:
+        error:
+          code: invalid_params
+          message: Дата начала должна быть раньше даты окончания
+          details: {field: period.start, reason: must_be_before_end}
+          correlation_id: c0a8012e-5f1d-4c2b-9e3a-7b6d8f9e0a11
+    ErrorPeriodTooLong:
+      summary: Период длиннее 10 лет
+      value:
+        error:
+          code: invalid_params
+          message: Период не может быть длиннее 3653 дней
+          details: {field: period, reason: too_long, allowed: {max: 3653}}
+          correlation_id: c0a8012e-5f1d-4c2b-9e3a-7b6d8f9e0a11
+    ErrorUnknownField:
+      summary: Неизвестное поле в запросе
+      value:
+        error:
+          code: invalid_params
+          message: Поле leverage не поддерживается
+          details: {field: leverage, reason: unknown_field}
+          correlation_id: c0a8012e-5f1d-4c2b-9e3a-7b6d8f9e0a11
+    ErrorTooManyActiveJobs:
+      summary: Превышен лимит активных заданий
+      value:
+        error:
+          code: too_many_active_jobs
+          message: Не больше 20 заданий в очереди и в работе; дождитесь завершения или отмените лишние
+          details: {limit: 20, retry_after_seconds: 30}
+          correlation_id: c0a8012e-5f1d-4c2b-9e3a-7b6d8f9e0a11
+    ErrorInternal:
+      summary: Непредвиденная ошибка
+      value:
+        error:
+          code: internal_error
+          message: Внутренняя ошибка сервера
+          correlation_id: c0a8012e-5f1d-4c2b-9e3a-7b6d8f9e0a11
+    ErrorInvalidMarketData:
+      summary: Поставщик вернул данные без ожидаемого поля
+      value:
+        error:
+          code: invalid_market_data
+          message: Ответ поставщика данных не прошёл проверку
+          details: {reason: missing_field, provider_field: CLOSE}
+          correlation_id: c0a8012e-5f1d-4c2b-9e3a-7b6d8f9e0a11
+    ErrorMarketDataUnavailable:
+      summary: Поставщик молчит дольше 30 секунд
+      value:
+        error:
+          code: market_data_unavailable
+          message: Поставщик рыночных данных недоступен, повторите запрос позже
+          details: {reason: timeout, retry_after_seconds: 60}
+          correlation_id: c0a8012e-5f1d-4c2b-9e3a-7b6d8f9e0a11
