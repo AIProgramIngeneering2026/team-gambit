@@ -434,7 +434,8 @@ paths:
       operationId: cancelJob
       summary: Отменить задание
       description: |
-        Переводит задание из `queued` или `running` в `canceled` сразу, не дожидаясь worker.
+        Переводит задание из `queued` или `running` в `canceled` сразу, не дожидаясь worker. Переход из `created`
+        через API не наблюдается: задание сохраняется сразу в `queued` (см. `docs/architecture.md`, §3.1).
         Частичная работа отбрасывается: у отменённого задания нет метрик и сделок, поздний результат worker
         не сохраняется. Если задание успело завершиться раньше, отмена получает `409` с фактическим состоянием.
         Отмена задания в любом терминальном состоянии, включая уже отменённое, — `409 job_state_conflict`;
@@ -665,7 +666,8 @@ paths:
       description: |
         Синхронно проигрывает последние `history_window_bars` закрытых свечей от позиции `flat` и возвращает
         сигнал последнего бара с обоснованием (сценарий С2). Задание не создаётся, состояние сервера не меняется,
-        кроме кеша снимков, поэтому повтор безопасен и ключ идемпотентности не нужен.
+        кроме кеша снимков, поэтому повтор безопасен и ключ идемпотентности не нужен. Расчёты синхронны и занимают
+        соединение API, поэтому одновременных расчётов на процесс немного (по умолчанию 4); сверх лимита — `429 rate_limited`.
 
         В ответе всегда есть время последнего использованного бара (`bar_time`) и время расчёта
         (`generated_at`): данные дневные и не выдаются за поток реального времени. Сигнал стратегии
@@ -707,6 +709,17 @@ paths:
           $ref: '#/components/responses/PayloadTooLarge'
         '422':
           $ref: '#/components/responses/ValidationError'
+        '429':
+          description: Достигнут лимит одновременных расчётов текущего сигнала на процессе API; повторите запрос позже
+          headers:
+            Retry-After:
+              $ref: '#/components/headers/Retry-After'
+            X-Correlation-ID:
+              $ref: '#/components/headers/X-Correlation-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
@@ -1483,6 +1496,7 @@ components:
         - internal_error
         - invalid_market_data
         - market_data_unavailable
+        - rate_limited
 
     Allowed:
       type: object
