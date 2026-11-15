@@ -1,0 +1,63 @@
+# Конфигурация харнеса команды gambit. Секретов здесь нет: только имена переменных окружения.
+
+[team]
+slug = "gambit"                                  # папка teams/<slug>/ в Zadania
+repo = "AIProgramIngeneering2026/team-gambit"
+default_branch = "main"
+timezone = "Asia/Yekaterinburg"                  # все сроки курса — по Екатеринбургу (+05:00)
+
+[course]
+repo = "AIProgramIngeneering2026/Zadania"
+# Локальный клон Zadania. Порядок поиска: переменная HARNESS_ZADANIA_DIR, этот путь относительно
+# основного клона team-gambit, затем клон в .harness/state/Zadania (создаётся автоматически).
+local_path = "../Zadania"
+
+# Участники. reviewer — кто по CONTRIBUTING.md смотрит PR этого участника
+# («Девятов → Савенков» = PR Девятова смотрит Савенков).
+# token_env — ИМЯ переменной с токеном GitHub участника для запуска от его имени (scripts/harness/run.sh --as).
+# Значение токена в репозиторий не попадает.
+[[members]]
+login = "Vladislav-Savenkov"
+student = "СавенковВД"
+reviewer = "Shaaldy"
+token_env = "GH_TOKEN_VLADISLAV_SAVENKOV"
+
+[[members]]
+login = "Shaaldy"
+student = "БеляевНМ"
+reviewer = "d7rectCE"
+token_env = "GH_TOKEN_SHAALDY"
+
+[[members]]
+login = "d7rectCE"
+student = "ДевятовАЯ"
+reviewer = "Vladislav-Savenkov"
+token_env = "GH_TOKEN_D7RECTCE"
+
+[harness]
+# Кто сдаёт отчёт pN.md в Zadania: участник с индексом (N - 1) % 3 в списке members.
+# Если до срока осталось меньше report_fallback_hours, а отчёта нет — сдаёт любой, кто запустил /practice.
+report_fallback_hours = 6
+# За сколько часов до срока можно перехватить чужую задачу без PR (курс разрешает с 48 часов).
+takeover_hours_left = 24
+# Сколько раундов «замечания review → исправление» делает агент, прежде чем отметить PR как needs-human.
+max_fix_rounds = 2
+# Метка в теле всего, что создаёт харнес: по ней отличаем комментарии людей от комментариев агента.
+marker = "<!-- harness -->"
+
+[labels]
+practice_prefix = "practice:"    # practice:p3
+tracking = "harness:tracking"    # issue «план и статус практики»
+question = "question"            # вопрос команде
+assumption = "assumption"        # агент принял решение сам и ждёт подтверждения
+change_request = "change-request"
+answered = "answered"
+triaged = "triaged"
+blocked = "blocked"
+needs_human = "needs-human"
+
+[checks]
+# Ядро не зависит от веб-фреймворка и БД (практика 3, пункт 5).
+core_paths = ["src/tradelab/domain"]
+forbidden_core_imports = ["fastapi", "starlette", "uvicorn", "sqlalchemy", "alembic", "psycopg", "sqlite3", "httpx", "requests"]
+openapi = "docs/api/openapi.yaml"
