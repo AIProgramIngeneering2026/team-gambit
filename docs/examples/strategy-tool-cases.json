@@ -1,0 +1,82 @@
+{
+  "description": "Synthetic contract examples; dates and prices do not describe a real market.",
+  "snapshot_id": "5d6e7f80-91a2-4b3c-8d4e-5f6a7b8c9d0e",
+  "engine_version": "1.0.0",
+  "instrument": {"ticker": "TEST", "currency": "RUB", "lot_size": 10},
+  "calendar": {
+    "version": "synthetic-v1",
+    "sessions": ["2026-11-02", "2026-11-03", "2026-11-04", "2026-11-05", "2026-11-06", "2026-11-09", "2026-11-10"]
+  },
+  "period": {"start": "2026-11-02", "end": "2026-11-10"},
+  "initial_capital": "1000.00",
+  "commission_rate": "0.001",
+  "warmup_bars_available": 0,
+  "bars": [
+    {"trading_date": "2026-11-02", "open_time": "2026-11-02T07:00:00Z", "close_time": "2026-11-02T18:00:00Z", "open": "10", "high": "10", "low": "10", "close": "10", "volume": "1000"},
+    {"trading_date": "2026-11-03", "open_time": "2026-11-03T07:00:00Z", "close_time": "2026-11-03T18:00:00Z", "open": "10", "high": "10", "low": "10", "close": "10", "volume": "1000"},
+    {"trading_date": "2026-11-04", "open_time": "2026-11-04T07:00:00Z", "close_time": "2026-11-04T18:00:00Z", "open": "10", "high": "10", "low": "8", "close": "8", "volume": "1000"},
+    {"trading_date": "2026-11-05", "open_time": "2026-11-05T07:00:00Z", "close_time": "2026-11-05T18:00:00Z", "open": "8", "high": "12", "low": "8", "close": "12", "volume": "1000"},
+    {"trading_date": "2026-11-06", "open_time": "2026-11-06T07:00:00Z", "close_time": "2026-11-06T18:00:00Z", "open": "12", "high": "14", "low": "12", "close": "14", "volume": "1000"},
+    {"trading_date": "2026-11-09", "open_time": "2026-11-09T07:00:00Z", "close_time": "2026-11-09T18:00:00Z", "open": "15", "high": "15", "low": "6", "close": "6", "volume": "1000"},
+    {"trading_date": "2026-11-10", "open_time": "2026-11-10T07:00:00Z", "close_time": "2026-11-10T18:00:00Z", "open": "7", "high": "7", "low": "7", "close": "7", "volume": "1000"}
+  ],
+  "backtests": [
+    {
+      "strategy": "sma_crossover",
+      "strategy_version": "1.0.0",
+      "params": {"fast": 2, "slow": 3},
+      "required_bars": 4,
+      "expected_signals": ["INSUFFICIENT_DATA", "INSUFFICIENT_DATA", "INSUFFICIENT_DATA", "HOLD", "BUY", "SELL", "HOLD"],
+      "expected_reason_codes": ["insufficient_history", "insufficient_history", "insufficient_history", "no_cross", "cross_up", "cross_down", "no_cross"],
+      "expected_executions": [
+        {"side": "BUY", "signal_time": "2026-11-06T18:00:00Z", "execution_time": "2026-11-09T07:00:00Z", "quantity": 60, "price": "15", "commission": "0.90", "cash_after": "99.10"},
+        {"side": "SELL", "signal_time": "2026-11-09T18:00:00Z", "execution_time": "2026-11-10T07:00:00Z", "quantity": 60, "price": "7", "commission": "0.42", "cash_after": "518.68"}
+      ],
+      "expected_final_quantity": 0,
+      "expected_final_cash": "518.68",
+      "expected_final_equity": "518.68",
+      "expected_total_return": "-0.48132"
+    },
+    {
+      "strategy": "buy_and_hold",
+      "strategy_version": "1.0.0",
+      "params": {},
+      "required_bars": 1,
+      "expected_signals": ["BUY", "HOLD", "HOLD", "HOLD", "HOLD", "HOLD", "HOLD"],
+      "expected_reason_codes": ["enter_baseline", "keep_baseline", "keep_baseline", "keep_baseline", "keep_baseline", "keep_baseline", "keep_baseline"],
+      "expected_executions": [
+        {"side": "BUY", "signal_time": "2026-11-02T18:00:00Z", "execution_time": "2026-11-03T07:00:00Z", "quantity": 90, "price": "10", "commission": "0.90", "cash_after": "99.10"}
+      ],
+      "expected_final_quantity": 90,
+      "expected_final_cash": "99.10",
+      "expected_final_equity": "729.10",
+      "expected_total_return": "-0.2709"
+    }
+  ],
+  "tool_calls": [
+    {"strategy": "sma_crossover", "params": {"fast": 2, "slow": 3}, "bar_count": 5, "position": "long", "expected_signal": "HOLD", "expected_reason_code": "cross_up_while_long"},
+    {"strategy": "sma_crossover", "params": {"fast": 2, "slow": 3}, "bar_count": 6, "position": "flat", "expected_signal": "HOLD", "expected_reason_code": "cross_down_while_flat"},
+    {"strategy": "sma_crossover", "params": {"fast": 2, "slow": 3}, "bar_count": 4, "position": "flat", "expected_signal": "HOLD", "expected_reason_code": "no_cross"},
+    {"strategy": "buy_and_hold", "params": {}, "bar_count": 0, "position": "flat", "expected_signal": "INSUFFICIENT_DATA", "expected_reason_code": "insufficient_history"}
+  ],
+  "invalid_params": [
+    {"strategy": "sma_crossover", "params": {"fast": 0}, "field": "params.fast", "reason": "out_of_range"},
+    {"strategy": "sma_crossover", "params": {"fast": true}, "field": "params.fast", "reason": "wrong_type"},
+    {"strategy": "sma_crossover", "params": {"fast": "20"}, "field": "params.fast", "reason": "wrong_type"},
+    {"strategy": "sma_crossover", "params": {"fast": 20.5}, "field": "params.fast", "reason": "wrong_type"},
+    {"strategy": "sma_crossover", "params": {"fast": 50, "slow": 50}, "field": "params.fast", "reason": "must_be_less_than_slow"},
+    {"strategy": "sma_crossover", "params": {"extra": 1}, "field": "params.extra", "reason": "unknown_field"},
+    {"strategy": "buy_and_hold", "params": {"fast": 20}, "field": "params.fast", "reason": "unknown_field"}
+  ],
+  "signal_windows": [
+    {"strategy": "sma_crossover", "params": {}, "expected_window": 252},
+    {"strategy": "sma_crossover", "params": {"slow": 300}, "expected_window": 301},
+    {"strategy": "sma_crossover", "params": {"slow": 500}, "expected_window": 501},
+    {"strategy": "sma_crossover", "params": {"slow": 300}, "history_window_bars": 252, "expected_error": {"field": "history_window_bars", "reason": "less_than_required_bars"}},
+    {"strategy": "buy_and_hold", "params": {}, "history_window_bars": 0, "expected_error": {"field": "history_window_bars", "reason": "out_of_range"}}
+  ],
+  "commission_boundaries": [
+    {"cash": "1000.00", "price": "0.999994", "commission_rate": "0.000006", "lot_size": 1, "expected_preliminary_quantity": 1000, "expected_quantity": 999, "expected_commission": "0.01", "expected_cash_after": "1.00"},
+    {"cash": "1000.00", "price": "999.999", "commission_rate": "0.000004", "lot_size": 1, "expected_preliminary_quantity": 0, "expected_quantity": 1, "expected_commission": "0.00", "expected_cash_after": "0.00"}
+  ]
+}
