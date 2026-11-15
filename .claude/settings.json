@@ -1,0 +1,74 @@
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep",
+      "Bash(git status *)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git show *)",
+      "Bash(git fetch *)",
+      "Bash(git pull --ff-only *)",
+      "Bash(git switch *)",
+      "Bash(git checkout -b *)",
+      "Bash(git branch *)",
+      "Bash(git worktree *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git push *)",
+      "Bash(git rev-parse *)",
+      "Bash(git remote *)",
+      "Bash(git merge-base *)",
+      "Bash(git ls-files *)",
+      "Bash(git ls-tree *)",
+      "Bash(git -C *)",
+      "Bash(gh *)",
+      "Bash(python3 scripts/harness/*)",
+      "Bash(scripts/harness/*)",
+      "Bash(bash scripts/harness/*)",
+      "Bash(uv *)",
+      "Bash(uvx *)",
+      "Bash(ls *)",
+      "Bash(mkdir *)",
+      "Bash(date *)",
+      "Bash(wc *)",
+      "Bash(sort *)",
+      "Bash(head *)",
+      "Bash(tail *)",
+      "Bash(grep *)",
+      "Bash(sed -n *)",
+      "Bash(cat *)",
+      "Bash(diff *)",
+      "Bash(echo *)",
+      "Bash(python3 -m unittest *)"
+    ],
+    "deny": [
+      "Bash(git push --force *)",
+      "Bash(git push -f *)",
+      "Bash(git push --force-with-lease *)",
+      "Bash(git reset --hard *)",
+      "Bash(git clean *)",
+      "Bash(gh repo delete *)",
+      "Bash(gh auth token *)",
+      "Read(./.env)",
+      "Read(./.env.*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"$CLAUDE_PROJECT_DIR/scripts/harness/guard.py\"; [ ! -f \"$f\" ] || python3 \"$f\"",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

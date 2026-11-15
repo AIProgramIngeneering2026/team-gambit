@@ -1,0 +1,18 @@
+# Локальное состояние харнеса: журналы запусков, блокировки, клон Zadania
+.harness/state/
+
+# Личные настройки Claude Code и рабочие деревья агентов
+.claude/settings.local.json
+.claude/worktrees/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Системное
+.DS_Store
+.env
+.env.*
