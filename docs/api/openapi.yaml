@@ -1176,19 +1176,24 @@ components:
 
     Metrics:
       type: object
-      description: Доли записаны десятичными строками (`0.3420` = 34,2%). Метрики сделок считаются по закрытым позициям (покупка и продажа).
+      description: Доли записаны десятичными строками (`0.3420` = 34,2%). Формулы зафиксированы в `docs/tool-contract.md` §8 и D-40. Метрики сделок считаются по закрытым позициям (покупка и продажа).
       required: [total_return, buy_and_hold_return, max_drawdown, sharpe_ratio, final_equity, trades_count, closed_positions_count, win_rate, avg_position_return]
       properties:
         total_return:
           $ref: '#/components/schemas/Decimal'
         buy_and_hold_return:
-          $ref: '#/components/schemas/Decimal'
+          description: Общая доходность независимого прогона базовой стратегии на том же снимке, периоде, капитале и комиссии.
+          allOf:
+            - $ref: '#/components/schemas/Decimal'
         max_drawdown:
           allOf:
             - $ref: '#/components/schemas/Decimal'
-          description: Наибольшее падение капитала от пика, неположительная доля.
+          description: Минимум `equity / previous_peak - 1` и нуля. Начальный капитал является первым пиком, поэтому убыток первого закрытия учитывается.
         sharpe_ratio:
-          description: Годовой коэффициент Шарпа по дневной доходности, 252 торговых дня, безрисковая ставка 0. `null`, если доходность не менялась.
+          description: >-
+            `mean(r) / sample_std(r) * sqrt(252)` по дневным доходностям без безрисковой ставки.
+            Первая доходность считается от начального капитала. `null` при менее чем двух
+            доходностях или нулевом выборочном стандартном отклонении.
           oneOf:
             - $ref: '#/components/schemas/Decimal'
             - type: 'null'
@@ -1202,12 +1207,12 @@ components:
           type: integer
           minimum: 0
         win_rate:
-          description: Доля прибыльных закрытых позиций; `null`, если закрытых нет.
+          description: Доля закрытых позиций со строго положительным PnL после обеих комиссий; `null`, если закрытых нет.
           oneOf:
             - $ref: '#/components/schemas/Decimal'
             - type: 'null'
         avg_position_return:
-          description: Средний результат закрытой позиции с учётом комиссий; `null`, если закрытых нет.
+          description: Среднее арифметическое `pnl / (стоимость покупки + комиссия покупки)` по закрытым позициям; `null`, если закрытых нет.
           oneOf:
             - $ref: '#/components/schemas/Decimal'
             - type: 'null'
@@ -1237,7 +1242,7 @@ components:
         reason:
           $ref: '#/components/schemas/Reason'
         pnl:
-          description: Результат закрытой позиции с учётом комиссий; только у `SELL`.
+          description: Для SELL — выручка без комиссии продажи минус стоимость покупки и комиссия покупки. У BUY `null`; открытая позиция не считается закрытой.
           oneOf:
             - $ref: '#/components/schemas/Decimal'
             - type: 'null'

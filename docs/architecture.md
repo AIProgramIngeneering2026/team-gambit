@@ -102,8 +102,8 @@ flowchart TB
 | 8 | Reaper → JobLifecycle | Перевод в `failed` заданий с истёкшей арендой (`worker_lost`) или превышенным сроком выполнения (`job_timeout`). |
 | 9 | JobLifecycle → JobRepository | Условное обновление состояния (compare-and-set) и запись в `JobStatusHistory` в одной транзакции. |
 | 10, 12 | JobRunner / SignalService → MarketDataService | Запрос свечей инструмента за период или последнее окно; ответ — проверенный неизменяемый снимок с `snapshot_id`. |
-| 11, 13 | JobRunner / SignalService → BacktestEngine | Снимок, нормализованные параметры, капитал и комиссия; ответ — сигналы, сделки, метрики, кривая капитала. |
-| 14 | BacktestEngine → Dispatcher | Имя стратегии, префикс закрытых баров, позиция, параметры; ответ — `ToolResult` или `ToolError`. |
+| 11, 13 | JobRunner / SignalService → BacktestEngine | Снимок, основная стратегия с нормализованными параметрами, капитал и комиссия; для полного бэктеста также базовая стратегия как второй generic-запрос. Ответ — сигналы, сделки, метрики (включая доходность базового прогона), кривая капитала. |
+| 14 | BacktestEngine → Dispatcher | `execute(name, version, closed_bars, position, normalized_params)`: точные имя и версия стратегии, неизменяемый префикс закрытых баров, фактическая позиция и параметры; ответ — `ToolResult` или `ToolError`. Тот же протокол используется для основной и базовой стратегий. |
 | 15 | Dispatcher → Registry | Поиск Tool по имени; неизвестное имя — `unknown_operation`. |
 | 16 | Dispatcher → StrategyTool | Вызов `execute` по контракту из `docs/tool-contract.md`. |
 | 17 | MarketDataService → JobRepository | Чтение кешированного снимка, сохранение нового снимка со временем получения. |
