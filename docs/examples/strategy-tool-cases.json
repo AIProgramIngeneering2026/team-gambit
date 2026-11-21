@@ -29,13 +29,21 @@
       "expected_signals": ["INSUFFICIENT_DATA", "INSUFFICIENT_DATA", "INSUFFICIENT_DATA", "HOLD", "BUY", "SELL", "HOLD"],
       "expected_reason_codes": ["insufficient_history", "insufficient_history", "insufficient_history", "no_cross", "cross_up", "cross_down", "no_cross"],
       "expected_executions": [
-        {"side": "BUY", "signal_time": "2026-11-06T18:00:00Z", "execution_time": "2026-11-09T07:00:00Z", "quantity": 60, "price": "15", "commission": "0.90", "cash_after": "99.10"},
-        {"side": "SELL", "signal_time": "2026-11-09T18:00:00Z", "execution_time": "2026-11-10T07:00:00Z", "quantity": 60, "price": "7", "commission": "0.42", "cash_after": "518.68"}
+        {"side": "BUY", "signal_time": "2026-11-06T18:00:00Z", "execution_time": "2026-11-09T07:00:00Z", "quantity": 60, "price": "15", "commission": "0.90", "cash_after": "99.10", "pnl": null},
+        {"side": "SELL", "signal_time": "2026-11-09T18:00:00Z", "execution_time": "2026-11-10T07:00:00Z", "quantity": 60, "price": "7", "commission": "0.42", "cash_after": "518.68", "pnl": "-481.32"}
       ],
       "expected_final_quantity": 0,
       "expected_final_cash": "518.68",
       "expected_final_equity": "518.68",
-      "expected_total_return": "-0.48132"
+      "expected_equity_curve": ["1000", "1000", "1000", "1000", "1000", "459.10", "518.68"],
+      "expected_total_return": "-0.48132",
+      "expected_buy_and_hold_return": "-0.2709",
+      "expected_max_drawdown": "-0.5409",
+      "expected_sharpe_ratio": "-4.275867711799707337072847809",
+      "expected_trades_count": 2,
+      "expected_closed_positions_count": 1,
+      "expected_win_rate": "0",
+      "expected_avg_position_return": "-0.5342657342657342657342657343"
     },
     {
       "strategy": "buy_and_hold",
@@ -45,12 +53,20 @@
       "expected_signals": ["BUY", "HOLD", "HOLD", "HOLD", "HOLD", "HOLD", "HOLD"],
       "expected_reason_codes": ["enter_baseline", "keep_baseline", "keep_baseline", "keep_baseline", "keep_baseline", "keep_baseline", "keep_baseline"],
       "expected_executions": [
-        {"side": "BUY", "signal_time": "2026-11-02T18:00:00Z", "execution_time": "2026-11-03T07:00:00Z", "quantity": 90, "price": "10", "commission": "0.90", "cash_after": "99.10"}
+        {"side": "BUY", "signal_time": "2026-11-02T18:00:00Z", "execution_time": "2026-11-03T07:00:00Z", "quantity": 90, "price": "10", "commission": "0.90", "cash_after": "99.10", "pnl": null}
       ],
       "expected_final_quantity": 90,
       "expected_final_cash": "99.10",
       "expected_final_equity": "729.10",
-      "expected_total_return": "-0.2709"
+      "expected_equity_curve": ["1000", "999.10", "819.10", "1179.10", "1359.10", "639.10", "729.10"],
+      "expected_total_return": "-0.2709",
+      "expected_buy_and_hold_return": "-0.2709",
+      "expected_max_drawdown": "-0.5297623427268045029799131778",
+      "expected_sharpe_ratio": "0.1661147454861247096837973787",
+      "expected_trades_count": 1,
+      "expected_closed_positions_count": 0,
+      "expected_win_rate": null,
+      "expected_avg_position_return": null
     }
   ],
   "tool_calls": [
