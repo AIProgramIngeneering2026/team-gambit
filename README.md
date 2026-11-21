@@ -31,6 +31,14 @@ TradeLab проверяет торговую стратегию на истор�
 
 Подробное описание проекта — в [docs/concept.md](docs/concept.md), сценарии и критерии приёмки — в [docs/requirements.md](docs/requirements.md), архитектура и жизненный цикл задания — в [docs/architecture.md](docs/architecture.md), архитектурные решения — в [docs/adr](docs/adr).
 
+## Проверка доменного ядра
+
+```bash
+PYTHONPATH=src uv run --no-project --with pytest python -m pytest -q tests/domain
+```
+
+Перед pull request также запускается `scripts/harness/check.sh`.
+
 ## Команда
 
 - Беляев Н. М.
