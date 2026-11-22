@@ -1,7 +1,7 @@
 import re
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta, timezone
-from decimal import ROUND_HALF_UP, Decimal, Inexact, Rounded, localcontext
+from decimal import ROUND_HALF_UP, Context, Decimal, localcontext
 from uuid import uuid4
 
 from .backtest import BacktestEngine
@@ -16,6 +16,7 @@ from .strategy_tool import ParamValue, ToolError
 _DECIMAL_PATTERN = re.compile(r"-?(0|[1-9][0-9]{0,17})(\.[0-9]{1,10})?")
 _TICKER_PATTERN = re.compile(r"[A-Za-z0-9]{1,12}")
 _STRATEGY_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,63}")
+_CAPITAL_CONTEXT = Context(prec=28, rounding=ROUND_HALF_UP)
 _MONEY_QUANTUM = Decimal("0.01")
 _DEFAULT_PARAMS = object()
 _MARKET_TIMEZONE = timezone(timedelta(hours=3), name="Europe/Moscow")
@@ -125,11 +126,8 @@ class JobService:
         )
         baseline_tool = self._registry.get("buy_and_hold")
         baseline_params = baseline_tool.validate_params({})
-        with localcontext() as context:
-            context.prec = 28
-            context.traps[Inexact] = False
-            context.traps[Rounded] = False
-            capital = capital.quantize(_MONEY_QUANTUM, rounding=ROUND_HALF_UP)
+        with localcontext(_CAPITAL_CONTEXT):
+            capital = capital.quantize(_MONEY_QUANTUM)
 
         config = BacktestJobConfig(
             ticker=normalized_ticker,

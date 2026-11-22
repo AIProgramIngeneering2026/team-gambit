@@ -266,9 +266,10 @@ def test_c1_1_capital_quantization_isolates_caller_decimal_context(service_parts
     assert repository.get(JOB_ID) is job
 
 
-def test_c1_1_expected_capital_rounding_ignores_caller_inexact_traps(service_parts):
+def test_c1_1_expected_capital_rounding_ignores_caller_decimal_limits(service_parts):
     service, repository = service_parts
     with localcontext() as context:
+        context.Emax = 3
         context.traps[Inexact] = True
         context.traps[Rounded] = True
 
@@ -277,6 +278,7 @@ def test_c1_1_expected_capital_rounding_ignores_caller_inexact_traps(service_par
         assert job.state is JobState.QUEUED
         assert job.config is not None
         assert job.config.initial_capital == Decimal("100000.01")
+        assert context.Emax == 3
         assert context.traps[Inexact]
         assert context.traps[Rounded]
     assert repository.get(JOB_ID) is job
