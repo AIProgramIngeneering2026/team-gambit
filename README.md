@@ -44,3 +44,17 @@ PYTHONPATH=src uv run --no-project --with pytest python -m pytest -q tests/domai
 - Беляев Н. М.
 - Девятов А. Я.
 - Савенков В. Д.
+
+## Проверки
+
+Все тесты проекта, включая unittest-тесты харнеса, запускаются одной командой:
+
+```bash
+uv run pytest -q
+```
+
+Полная проверка перед pull request — тесты, ссылки в документах, OpenAPI, независимость ядра и Ruff:
+
+```bash
+scripts/harness/check.sh
+```
