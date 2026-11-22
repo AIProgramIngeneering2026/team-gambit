@@ -5,7 +5,8 @@ from decimal import ROUND_HALF_UP, Decimal, localcontext
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from .backtest import BacktestEngine, BacktestPeriod, StrategySpec
+from .backtest import BacktestEngine
+from .backtest_types import BacktestPeriod, StrategySpec
 from .instrument_catalog import InstrumentCatalog
 from .job import BacktestJobConfig, Job
 from .job_lifecycle import JobLifecycle
