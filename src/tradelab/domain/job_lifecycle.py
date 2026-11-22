@@ -30,6 +30,11 @@ class JobLifecycle:
                 return updated
             # При гонке, например между отменой и захватом, проверяем новое состояние.
 
+    def create_and_enqueue(self, job: Job, now: datetime) -> Job:
+        queued = job.enqueue(now)
+        self.repository.add(queued)
+        return queued
+
     def enqueue(self, job_id: str, now: datetime) -> Job:
         return self._move(job_id, JobState.QUEUED, lambda job: job.enqueue(now))
 

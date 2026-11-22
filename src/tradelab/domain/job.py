@@ -1,9 +1,10 @@
 from dataclasses import dataclass, replace
 from datetime import datetime
+from decimal import Decimal
 from enum import StrEnum
 from typing import Literal, TypeAlias, get_args
 
-from .backtest_types import BacktestResult
+from .backtest_types import BacktestPeriod, BacktestResult, StrategySpec
 
 
 class JobState(StrEnum):
@@ -77,6 +78,17 @@ class JobFailure:
 
 
 @dataclass(frozen=True, slots=True)
+class BacktestJobConfig:
+    ticker: str
+    period: BacktestPeriod
+    strategy: StrategySpec
+    baseline: StrategySpec
+    initial_capital: Decimal
+    commission_rate: Decimal
+    engine_version: str
+
+
+@dataclass(frozen=True, slots=True)
 class Job:
     id: str
     created_at: datetime
@@ -90,6 +102,7 @@ class Job:
     finished_at: datetime | None = None
     result: BacktestResult | None = None
     error: JobFailure | None = None
+    config: BacktestJobConfig | None = None
 
     def __post_init__(self) -> None:
         history = tuple(self.history)
