@@ -1,15 +1,24 @@
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import date, datetime
+from datetime import datetime
 from decimal import (
     ROUND_HALF_EVEN,
     ROUND_HALF_UP,
+    Context,
     Decimal,
     localcontext,
 )
 from itertools import pairwise
 from typing import Protocol
 
+from tradelab.domain.backtest_types import (
+    BacktestMetrics,
+    BacktestPeriod,
+    BacktestResult,
+    EquityPoint,
+    StrategySpec,
+    Trade,
+)
 from tradelab.domain.strategy_tool import (
     Candle,
     NormalizedParams,
@@ -20,6 +29,7 @@ from tradelab.domain.strategy_tool import (
     ToolResult,
 )
 
+_BACKTEST_CONTEXT = Context(prec=28, rounding=ROUND_HALF_EVEN)
 _MONEY_QUANTUM = Decimal("0.01")
 
 
@@ -40,19 +50,6 @@ class MarketSnapshot:
         object.__setattr__(self, "bars", tuple(self.bars))
 
 
-@dataclass(frozen=True, slots=True)
-class BacktestPeriod:
-    start: date
-    end: date
-
-
-@dataclass(frozen=True, slots=True)
-class StrategySpec:
-    name: str
-    version: str
-    normalized_params: NormalizedParams
-
-
 class ToolDispatcher(Protocol):
     def execute(
         self,
@@ -62,66 +59,6 @@ class ToolDispatcher(Protocol):
         position: Position,
         normalized_params: NormalizedParams,
     ) -> ToolResult: ...
-
-
-@dataclass(frozen=True, slots=True)
-class EquityPoint:
-    date: date
-    equity: Decimal
-
-
-@dataclass(frozen=True, slots=True)
-class Trade:
-    side: Signal
-    signal_time: datetime
-    execution_time: datetime
-    price: Decimal
-    quantity: int
-    commission: Decimal
-    cash_after: Decimal
-    reason: SignalReason
-    pnl: Decimal | None
-
-    @property
-    def signal_date(self) -> date:
-        return self.signal_time.date()
-
-    @property
-    def execution_date(self) -> date:
-        return self.execution_time.date()
-
-
-@dataclass(frozen=True, slots=True)
-class BacktestMetrics:
-    total_return: Decimal
-    buy_and_hold_return: Decimal | None
-    max_drawdown: Decimal
-    sharpe_ratio: Decimal | None
-    final_equity: Decimal
-    trades_count: int
-    closed_positions_count: int
-    win_rate: Decimal | None
-    avg_position_return: Decimal | None
-
-
-@dataclass(frozen=True, slots=True)
-class BacktestResult:
-    snapshot_id: str
-    strategy: StrategySpec
-    period: BacktestPeriod
-    engine_version: str
-    metrics: BacktestMetrics
-    final_position: Position
-    final_cash: Decimal
-    final_quantity: int
-    equity_curve: tuple[EquityPoint, ...]
-    trades: tuple[Trade, ...]
-    signals: tuple[ToolResult, ...]
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "equity_curve", tuple(self.equity_curve))
-        object.__setattr__(self, "trades", tuple(self.trades))
-        object.__setattr__(self, "signals", tuple(self.signals))
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,9 +99,7 @@ def _preliminary_lots(
 def calculate_purchase(
     cash: Decimal, price: Decimal, commission_rate: Decimal, lot_size: int
 ) -> PurchasePlan:
-    with localcontext() as context:
-        context.prec = 28
-        context.rounding = ROUND_HALF_EVEN
+    with localcontext(_BACKTEST_CONTEXT):
         cash = _money(cash)
         preliminary_lots = _preliminary_lots(cash, price, commission_rate, lot_size)
 
@@ -205,20 +140,31 @@ def _tool_failed(message: str, reason: str) -> ToolError:
     return ToolError("tool_failed", message, "tool.result", reason)
 
 
-def _validate_tool_result(
+def _validated_tool_result(
     result: ToolResult, bar: Candle, position: Position
-) -> None:
-    if not isinstance(result.signal, Signal):
+) -> ToolResult:
+    signal = result.signal
+    bar_time = result.bar_time
+    reason = result.reason
+    indicators = result.indicators
+    if not isinstance(signal, Signal):
         raise _tool_failed("Tool вернул неизвестный сигнал", "invalid_signal")
-    if result.bar_time != bar.close_time:
+    if not isinstance(bar_time, datetime) or bar_time != bar.close_time:
         raise _tool_failed("Tool вернул время другого бара", "invalid_bar_time")
-    if not isinstance(result.reason, SignalReason):
+    if not isinstance(reason, SignalReason):
         raise _tool_failed("Tool вернул неверное обоснование", "invalid_reason")
-    if not result.reason.code.strip() or not result.reason.message.strip():
-        raise _tool_failed("Обоснование Tool не должно быть пустым", "invalid_reason")
-    if not isinstance(result.indicators, Mapping):
+    reason = SignalReason(reason.code, reason.message)
+    if (
+        not isinstance(reason.code, str)
+        or not isinstance(reason.message, str)
+        or not reason.code.strip()
+        or not reason.message.strip()
+    ):
+        raise _tool_failed("Обоснование Tool должно содержать код и текст", "invalid_reason")
+    if not isinstance(indicators, Mapping):
         raise _tool_failed("Индикаторы Tool должны быть объектом", "invalid_indicators")
-    for key, value in result.indicators.items():
+    indicators = dict(indicators)
+    for key, value in indicators.items():
         if not isinstance(key, str):
             raise _tool_failed("Имя индикатора должно быть строкой", "invalid_indicators")
         if value is not None and (
@@ -228,10 +174,13 @@ def _validate_tool_result(
                 "Индикатор должен быть конечной десятичной строкой или null",
                 "invalid_indicators",
             )
-    if result.signal is Signal.BUY and position is not Position.FLAT:
+    if signal is Signal.BUY and position is not Position.FLAT:
         raise _tool_failed("Tool вернул BUY при открытой позиции", "invalid_position")
-    if result.signal is Signal.SELL and position is not Position.LONG:
+    if signal is Signal.SELL and position is not Position.LONG:
         raise _tool_failed("Tool вернул SELL без открытой позиции", "invalid_position")
+    return ToolResult(
+        signal=signal, bar_time=bar.close_time, reason=reason, indicators=indicators
+    )
 
 
 class BacktestEngine:
@@ -249,9 +198,7 @@ class BacktestEngine:
         initial_capital: Decimal,
         commission_rate: Decimal,
     ) -> BacktestResult:
-        with localcontext() as context:
-            context.prec = 28
-            context.rounding = ROUND_HALF_EVEN
+        with localcontext(_BACKTEST_CONTEXT):
             initial_cash = _money(initial_capital)
             result = self._run_single(
                 snapshot, period, strategy, initial_cash, commission_rate
@@ -279,8 +226,7 @@ class BacktestEngine:
                 position,
                 strategy.normalized_params,
             )
-            _validate_tool_result(result, closed_bars[-1], position)
-            return result
+            return _validated_tool_result(result, closed_bars[-1], position)
         except ToolError:
             raise
         except Exception as error:

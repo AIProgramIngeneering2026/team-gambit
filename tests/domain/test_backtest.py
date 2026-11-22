@@ -1,7 +1,8 @@
 from dataclasses import FrozenInstanceError
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_UP, Decimal, Inexact, Rounded, localcontext
 from types import SimpleNamespace
+from typing import get_type_hints
 
 import pytest
 
@@ -13,6 +14,9 @@ from tradelab.domain.backtest import (
     StrategySpec,
     calculate_purchase,
 )
+from tradelab.domain.job import Job
+from tradelab.domain.job_lifecycle import JobLifecycle
+from tradelab.domain.job_repository import InMemoryJobRepository
 from tradelab.domain.registry import Registry
 from tradelab.domain.strategies import register_builtin_strategies
 from tradelab.domain.strategy_tool import (
@@ -230,7 +234,7 @@ def test_i33_1_identical_inputs_produce_identical_results(
     assert len(dispatchers[0].calls) == len(dispatchers[1].calls)
 
 
-def test_z3_tool_receives_only_immutable_prefixes():
+def test_i33_1_tool_receives_only_immutable_prefixes():
     bars = make_candles([("10", "10"), ("11", "11"), ("12", "12")])
 
     def hold(name, closed_bars, position):
@@ -247,7 +251,7 @@ def test_z3_tool_receives_only_immutable_prefixes():
         assert call[3] is Position.FLAT
 
 
-def test_z3_tool_cannot_mutate_snapshot():
+def test_i33_1_tool_cannot_mutate_snapshot():
     bars = make_candles([("10", "10")])
     snapshot = MarketSnapshot(
         "snapshot", InstrumentMetadata("TEST", "RUB", 1), bars
@@ -432,9 +436,95 @@ def test_i33_6_unknown_signal_is_tool_failed():
     assert raised.value.code == "tool_failed"
 
 
-@pytest.mark.parametrize("field", ["bar_time", "reason_code", "reason_message"])
+def test_i33_6_mutable_tool_response_is_copied_before_storage():
+    bars = make_candles([("10", "10")])
+    response = SimpleNamespace(
+        signal=Signal.HOLD,
+        bar_time=bars[-1].close_time,
+        reason=SignalReason("test", "Пояснение"),
+        indicators={"value": "1"},
+    )
+
+    def respond(name, closed_bars, position):
+        return response
+
+    result = run_engine(FunctionalDispatcher(respond), bars)
+    response.signal = Signal.SELL
+    response.reason = SignalReason("changed", "Изменённое пояснение")
+    response.indicators["value"] = "NaN"
+
+    (saved,) = result.signals
+    assert type(saved) is ToolResult
+    assert saved.signal is Signal.HOLD
+    assert saved.reason.code == "test"
+    assert saved.indicators == {"value": "1"}
+    with pytest.raises(TypeError):
+        saved.indicators["value"] = "2"
+
+
+def test_i33_4_job_stores_the_canonical_engine_result():
+    bars = make_candles([("10", "10")])
+
+    def hold(name, closed_bars, position):
+        return tool_result(Signal.HOLD, closed_bars)
+
+    result = run_engine(FunctionalDispatcher(hold), bars)
+    assert get_type_hints(Job)["result"] == type(result) | None
+
+    now = bars[0].close_time
+    repository = InMemoryJobRepository()
+    job = Job("engine-result", now, snapshot_id=result.snapshot_id)
+    repository.add(job)
+    lifecycle = JobLifecycle(repository)
+    lifecycle.enqueue(job.id, now)
+    lifecycle.start(
+        job.id,
+        "worker-1",
+        now,
+        lease_expires_at=now + timedelta(seconds=30),
+        deadline_at=now + timedelta(minutes=5),
+    )
+    lifecycle.complete(job.id, "worker-1", result, now)
+    assert repository.get(job.id).result is result
+
+
+def test_i33_1_engine_is_independent_of_callers_decimal_context(
+    contract_cases, contract_bars
+):
+    registry = Registry()
+    register_builtin_strategies(registry)
+    case = contract_cases["backtests"][0]
+    purchase_args = (Decimal(1000), Decimal(11), Decimal("0.0005"), 1)
+    expected = run_real_contract(
+        case, contract_cases, contract_bars, RegistryDispatcher(registry)
+    )
+    expected_purchase = calculate_purchase(*purchase_args)
+
+    with localcontext() as caller:
+        caller.prec = 6
+        caller.rounding = ROUND_UP
+        caller.traps[Inexact] = True
+        caller.traps[Rounded] = True
+
+        actual = run_real_contract(
+            case, contract_cases, contract_bars, RegistryDispatcher(registry)
+        )
+        assert actual == expected
+        assert calculate_purchase(*purchase_args) == expected_purchase
+        assert caller.prec == 6
+        assert caller.rounding == ROUND_UP
+        assert caller.traps[Inexact] and caller.traps[Rounded]
+
+
+@pytest.mark.parametrize(
+    "field", ["bar_time", "bar_time_impostor", "reason_code", "reason_message"]
+)
 def test_i33_6_malformed_result_is_tool_failed(field):
     bars = make_candles([("10", "10")])
+
+    class EqualBarTime:
+        def __eq__(self, other):
+            return True
 
     def invalid(name, closed_bars, position):
         result = tool_result(Signal.HOLD, closed_bars)
@@ -446,6 +536,8 @@ def test_i33_6_malformed_result_is_tool_failed(field):
         }
         if field == "bar_time":
             values["bar_time"] = closed_bars[-1].open_time
+        elif field == "bar_time_impostor":
+            values["bar_time"] = EqualBarTime()
         elif field == "reason_code":
             values["reason"] = SignalReason("", "Пустой код")
         else:
