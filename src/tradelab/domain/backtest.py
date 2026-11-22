@@ -6,6 +6,7 @@ from decimal import (
     ROUND_HALF_UP,
     Context,
     Decimal,
+    InvalidOperation,
     localcontext,
 )
 from itertools import pairwise
@@ -167,9 +168,13 @@ def _validated_tool_result(
     for key, value in indicators.items():
         if not isinstance(key, str):
             raise _tool_failed("Имя индикатора должно быть строкой", "invalid_indicators")
-        if value is not None and (
-            not isinstance(value, str) or not Decimal(value).is_finite()
-        ):
+        try:
+            invalid_indicator = value is not None and (
+                not isinstance(value, str) or not Decimal(value).is_finite()
+            )
+        except InvalidOperation:
+            invalid_indicator = True
+        if invalid_indicator:
             raise _tool_failed(
                 "Индикатор должен быть конечной десятичной строкой или null",
                 "invalid_indicators",

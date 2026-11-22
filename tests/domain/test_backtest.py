@@ -549,7 +549,7 @@ def test_i33_6_malformed_result_is_tool_failed(field):
     assert raised.value.code == "tool_failed"
 
 
-@pytest.mark.parametrize("value", ["NaN", "Infinity", 1])
+@pytest.mark.parametrize("value", ["NaN", "Infinity", 1, "abc"])
 def test_i33_6_invalid_indicators_are_tool_failed(value):
     bars = make_candles([("10", "10")])
 
@@ -559,6 +559,7 @@ def test_i33_6_invalid_indicators_are_tool_failed(value):
     with pytest.raises(ToolError) as raised:
         run_engine(FunctionalDispatcher(invalid), bars)
     assert raised.value.code == "tool_failed"
+    assert raised.value.details["reason"] == "invalid_indicators"
 
 
 def test_i33_6_sell_while_flat_is_not_executed():
