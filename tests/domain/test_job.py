@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from threading import Barrier
+from types import SimpleNamespace
 
 import pytest
 
@@ -505,3 +506,21 @@ def test_result_for_another_snapshot_cannot_complete_a_job(lifecycle):
         service.complete(job_id, "worker-1", result, NOW)
 
     assert repository.get(job_id) == before
+
+
+@pytest.mark.parametrize(
+    "result", [None, SimpleNamespace(snapshot_id="snapshot-1")]
+)
+def test_complete_requires_canonical_result_without_partial_write(lifecycle, result):
+    service, repository, job_id = lifecycle
+    service.enqueue(job_id, NOW)
+    before = deepcopy(start(service, job_id))
+
+    with pytest.raises(ValueError, match="[Рр]езультат"):
+        service.complete(job_id, "worker-1", result, NOW)
+
+    current = repository.get(job_id)
+    assert current == before
+    assert current.history == before.history
+    assert current.result is None
+    assert current.state is JobState.RUNNING

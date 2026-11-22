@@ -179,6 +179,8 @@ class Job:
             )
         if result is None:
             raise ValueError("Для завершения задания нужен результат бэктеста")
+        if not isinstance(result, BacktestResult):
+            raise ValueError("Результат бэктеста имеет неверный тип")
         if result.snapshot_id != self.snapshot_id:
             raise ValueError("Результат расчёта ссылается на другой снимок данных")
         return self._transition(
