@@ -170,7 +170,13 @@ def make_runner(repository, registry, engine=None):
     lifecycle = JobLifecycle(repository)
     if engine is None:
         engine = BacktestEngine(Dispatcher(registry))
-    return JobRunner(lifecycle=lifecycle, registry=registry, engine=engine), lifecycle
+    runner = JobRunner(
+        lifecycle=lifecycle,
+        registry=registry,
+        engine=engine,
+        clock=lambda: NOW,
+    )
+    return runner, lifecycle
 
 
 def run(runner, snapshot):

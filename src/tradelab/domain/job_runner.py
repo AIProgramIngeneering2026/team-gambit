@@ -1,11 +1,17 @@
-from datetime import datetime
+from collections.abc import Callable
+from datetime import UTC, datetime
 
 from .backtest import BacktestEngine, MarketSnapshot
+from .backtest_types import BacktestResult
 from .job import InvalidTransition, Job, JobFailure
 from .job_lifecycle import JobLifecycle
 from .job_repository import JobRepository
 from .registry import Registry
 from .strategy_tool import ToolError
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
 
 
 class JobRunner:
@@ -15,11 +21,13 @@ class JobRunner:
         lifecycle: JobLifecycle,
         registry: Registry,
         engine: BacktestEngine,
+        clock: Callable[[], datetime] = _utc_now,
     ) -> None:
         self._lifecycle = lifecycle
         self._repository: JobRepository = lifecycle.repository
         self._registry = registry
         self._engine = engine
+        self._clock = clock
 
     def run(
         self,
@@ -43,7 +51,7 @@ class JobRunner:
             return self._lifecycle.fail_to_start(
                 job_id,
                 JobFailure("strategy_unavailable", error.message),
-                now,
+                self._clock(),
             )
 
         if config.engine_version != self._engine.version:
@@ -53,7 +61,7 @@ class JobRunner:
                     "engine_unavailable",
                     f"Сохранённая версия {config.engine_version} движка недоступна",
                 ),
-                now,
+                self._clock(),
             )
 
         if job.snapshot_id is not None and (
@@ -65,7 +73,7 @@ class JobRunner:
                     "snapshot_not_found",
                     f"Сохранённый снимок {job.snapshot_id} недоступен",
                 ),
-                now,
+                self._clock(),
             )
 
         self._lifecycle.start(
@@ -83,7 +91,7 @@ class JobRunner:
                     "market_data_unavailable",
                     "Поставщик данных не вернул снимок для нового задания",
                 ),
-                now,
+                self._clock(),
             )
         if not snapshot.snapshot_id.strip():
             return self._fail_late_aware(
@@ -93,7 +101,7 @@ class JobRunner:
                     "invalid_market_data",
                     "Снимок данных имеет пустой идентификатор",
                 ),
-                now,
+                self._clock(),
             )
         if config.ticker != snapshot.instrument.ticker:
             return self._fail_late_aware(
@@ -104,7 +112,7 @@ class JobRunner:
                     f"Тикер снимка {snapshot.instrument.ticker} не совпадает "
                     f"с тикером задания {config.ticker}",
                 ),
-                now,
+                self._clock(),
             )
 
         recorded = self._lifecycle.record_snapshot(
@@ -121,29 +129,50 @@ class JobRunner:
                 baseline=config.baseline,
                 initial_capital=config.initial_capital,
                 commission_rate=config.commission_rate,
+                clock=self._clock,
+                deadline_at=deadline_at,
             )
         except ToolError as error:
+            finished_at = self._clock()
+            if error.code == "job_timeout" and deadline_at < finished_at:
+                failure = JobFailure("job_timeout", "Истёк срок выполнения задания")
+            else:
+                failure = self._tool_failure(error)
             return self._fail_late_aware(
-                job_id, worker_id, self._tool_failure(error), now
+                job_id, worker_id, failure, finished_at
             )
         except Exception:
             return self._fail_late_aware(
                 job_id,
                 worker_id,
                 JobFailure("internal_error", "Неожиданная ошибка выполнения задания"),
-                now,
+                self._clock(),
             )
 
-        if result is None:
+        if (
+            not isinstance(result, BacktestResult)
+            or result.snapshot_id != recorded.snapshot_id
+        ):
             return self._fail_late_aware(
                 job_id,
                 worker_id,
-                JobFailure("internal_error", "Движок не вернул результат бэктеста"),
-                now,
+                JobFailure(
+                    "internal_error", "Движок вернул некорректный результат бэктеста"
+                ),
+                self._clock(),
+            )
+
+        finished_at = self._clock()
+        if deadline_at < finished_at:
+            return self._fail_late_aware(
+                job_id,
+                worker_id,
+                JobFailure("job_timeout", "Истёк срок выполнения задания"),
+                finished_at,
             )
 
         try:
-            return self._lifecycle.complete(job_id, worker_id, result, now)
+            return self._lifecycle.complete(job_id, worker_id, result, finished_at)
         except InvalidTransition:
             return self._repository.get(job_id)
 
