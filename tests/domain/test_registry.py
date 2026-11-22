@@ -163,5 +163,17 @@ def test_tool_error_preserves_field_and_reason():
     with pytest.raises(ToolError) as raised:
         ExampleTool("1.0.0").validate_params({"window": "1"})
     assert str(raised.value) == "Окно должно быть целым числом"
+    assert raised.value.message == "Окно должно быть целым числом"
     assert raised.value.code == "invalid_params"
     assert raised.value.details == {"field": "params.window", "reason": "wrong_type"}
+
+
+@pytest.mark.parametrize("field", ["code", "message", "details"])
+def test_tool_error_fields_are_read_only(field):
+    error = ToolError("invalid_params", "Неверное окно", "params.window", "wrong_type")
+    original = getattr(error, field)
+
+    with pytest.raises(AttributeError):
+        setattr(error, field, "новое значение")
+
+    assert getattr(error, field) == original
