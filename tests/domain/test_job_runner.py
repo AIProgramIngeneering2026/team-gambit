@@ -1,6 +1,7 @@
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
@@ -77,6 +78,8 @@ class RecordingEngine:
         baseline,
         initial_capital,
         commission_rate,
+        *,
+        before_tool_call=None,
     ):
         self.calls.append(
             (
@@ -97,6 +100,7 @@ class RecordingEngine:
             baseline,
             initial_capital,
             commission_rate,
+            before_tool_call=before_tool_call,
         )
 
 
@@ -163,11 +167,14 @@ def add_queued_job(repository, config, *, snapshot_id=None):
     return repository.get(JOB_ID)
 
 
-def make_runner(repository, registry, engine=None):
+def make_runner(repository, registry, engine=None, *, clock=lambda: NOW):
     lifecycle = JobLifecycle(repository)
     if engine is None:
         engine = BacktestEngine(Dispatcher(registry))
-    return JobRunner(lifecycle=lifecycle, registry=registry, engine=engine), lifecycle
+    return (
+        JobRunner(lifecycle=lifecycle, registry=registry, engine=engine, clock=clock),
+        lifecycle,
+    )
 
 
 def run(runner, snapshot):
@@ -454,14 +461,14 @@ def test_terminal_start_claim_is_not_masked(snapshot, registry, tool):
     assert tool.calls == []
 
 
-def assert_running_failure(job, code):
+def assert_running_failure(job, code, *, finished_at=NOW):
     assert job.state is JobState.FAILED
     assert job.error.code == code
     assert job.error.message.strip()
     assert job.result is None
     assert job.worker_id == WORKER_ID
     assert job.started_at == NOW
-    assert job.finished_at == NOW
+    assert job.finished_at == finished_at
     assert [entry.to_state for entry in job.history] == [
         JobState.CREATED,
         JobState.QUEUED,
@@ -513,24 +520,74 @@ def test_empty_snapshot_id_fails_after_start_before_record_and_tool(
     assert tool.calls == []
 
 
-class EmptyResultEngine:
-    version = BacktestEngine.version
-
-    def run(self, *args, **kwargs):
-        return None
-
-
-def test_none_engine_result_becomes_internal_error_instead_of_staying_running(
-    snapshot, registry, tool
+@pytest.mark.parametrize("kind", ["none", "wrong_type", "wrong_snapshot"])
+def test_invalid_engine_result_becomes_internal_error_instead_of_staying_running(
+    snapshot, registry, tool, kind
 ):
+    class InvalidResultEngine(BacktestEngine):
+        def run(self, *args, **kwargs):
+            if kind == "none":
+                return None
+            if kind == "wrong_type":
+                return SimpleNamespace(snapshot_id=snapshot.snapshot_id)
+            return replace(super().run(*args, **kwargs), snapshot_id="other")
+
     repository = InMemoryJobRepository()
     add_queued_job(repository, make_config(snapshot))
-    runner, _ = make_runner(repository, registry, EmptyResultEngine())
+    engine = InvalidResultEngine(Dispatcher(registry))
+    runner, _ = make_runner(repository, registry, engine)
 
     failed = run(runner, snapshot)
 
     assert_running_failure(failed, "internal_error")
-    assert tool.calls == []
+    assert repository.get(JOB_ID) is failed
+    assert bool(tool.calls) == (kind == "wrong_snapshot")
+
+
+def test_deadline_stops_before_next_tool_call(snapshot, registry, tool, monkeypatch):
+    current_time = NOW
+    expired_at = DEADLINE + timedelta(microseconds=1)
+    original_execute = tool.execute
+
+    def advance_clock(*args):
+        nonlocal current_time
+        result = original_execute(*args)
+        current_time = expired_at
+        return result
+
+    monkeypatch.setattr(tool, "execute", advance_clock)
+    repository = InMemoryJobRepository()
+    add_queued_job(repository, make_config(snapshot))
+    runner, _ = make_runner(repository, registry, clock=lambda: current_time)
+
+    failed = run(runner, snapshot)
+
+    assert_running_failure(failed, "job_timeout", finished_at=expired_at)
+    assert len(tool.calls) == 1
+    assert repository.get(JOB_ID) is failed
+
+
+def test_deadline_discards_result_returned_after_last_tool_call(snapshot, registry, tool):
+    current_time = NOW
+    expired_at = DEADLINE + timedelta(microseconds=1)
+
+    class DelayedEngine(BacktestEngine):
+        def run(self, *args, **kwargs):
+            nonlocal current_time
+            result = super().run(*args, **kwargs)
+            current_time = expired_at
+            return result
+
+    repository = InMemoryJobRepository()
+    add_queued_job(repository, make_config(snapshot))
+    engine = DelayedEngine(Dispatcher(registry))
+    runner, _ = make_runner(repository, registry, engine, clock=lambda: current_time)
+
+    failed = run(runner, snapshot)
+
+    assert_running_failure(failed, "job_timeout", finished_at=expired_at)
+    assert len(tool.calls) == len(snapshot.bars)
+    assert repository.get(JOB_ID) is failed
 
 
 @pytest.mark.parametrize(

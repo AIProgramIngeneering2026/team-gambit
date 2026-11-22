@@ -1,11 +1,26 @@
-from datetime import datetime
+from collections.abc import Callable
+from datetime import UTC, datetime
 
 from .backtest import BacktestEngine, MarketSnapshot
+from .backtest_types import BacktestResult
 from .job import InvalidTransition, Job, JobFailure
 from .job_lifecycle import JobLifecycle
 from .job_repository import JobRepository
 from .registry import Registry
 from .strategy_tool import ToolError
+
+
+_TIMEOUT_FAILURE = JobFailure("job_timeout", "Истёк срок выполнения задания")
+
+
+class _DeadlineExceeded(Exception):
+    def __init__(self, at: datetime) -> None:
+        super().__init__()
+        self.at = at
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
 
 
 class JobRunner:
@@ -15,11 +30,13 @@ class JobRunner:
         lifecycle: JobLifecycle,
         registry: Registry,
         engine: BacktestEngine,
+        clock: Callable[[], datetime] = _utc_now,
     ) -> None:
         self._lifecycle = lifecycle
         self._repository: JobRepository = lifecycle.repository
         self._registry = registry
         self._engine = engine
+        self._clock = clock
 
     def run(
         self,
@@ -113,6 +130,13 @@ class JobRunner:
         if recorded is None:
             return self._repository.get(job_id)
 
+        def check_deadline() -> None:
+            checked_at = self._clock()
+            if checked_at > deadline_at:
+                raise _DeadlineExceeded(checked_at)
+
+        result = None
+        failure = None
         try:
             result = self._engine.run(
                 snapshot=snapshot,
@@ -121,29 +145,34 @@ class JobRunner:
                 baseline=config.baseline,
                 initial_capital=config.initial_capital,
                 commission_rate=config.commission_rate,
+                before_tool_call=check_deadline,
+            )
+        except _DeadlineExceeded as error:
+            return self._fail_late_aware(
+                job_id, worker_id, _TIMEOUT_FAILURE, error.at
             )
         except ToolError as error:
-            return self._fail_late_aware(
-                job_id, worker_id, self._tool_failure(error), now
-            )
+            failure = self._tool_failure(error)
         except Exception:
-            return self._fail_late_aware(
-                job_id,
-                worker_id,
-                JobFailure("internal_error", "Неожиданная ошибка выполнения задания"),
-                now,
+            failure = JobFailure(
+                "internal_error", "Неожиданная ошибка выполнения задания"
             )
 
-        if result is None:
+        finished_at = self._clock()
+        if finished_at > deadline_at:
+            failure = _TIMEOUT_FAILURE
+        if failure is not None:
+            return self._fail_late_aware(job_id, worker_id, failure, finished_at)
+        if not isinstance(result, BacktestResult) or result.snapshot_id != snapshot.snapshot_id:
             return self._fail_late_aware(
                 job_id,
                 worker_id,
-                JobFailure("internal_error", "Движок не вернул результат бэктеста"),
-                now,
+                JobFailure("internal_error", "Движок вернул некорректный результат бэктеста"),
+                finished_at,
             )
 
         try:
-            return self._lifecycle.complete(job_id, worker_id, result, now)
+            return self._lifecycle.complete(job_id, worker_id, result, finished_at)
         except InvalidTransition:
             return self._repository.get(job_id)
 

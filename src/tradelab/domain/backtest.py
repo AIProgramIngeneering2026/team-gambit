@@ -1,4 +1,4 @@
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import (
@@ -202,14 +202,16 @@ class BacktestEngine:
         baseline: StrategySpec,
         initial_capital: Decimal,
         commission_rate: Decimal,
+        *,
+        before_tool_call: Callable[[], None] | None = None,
     ) -> BacktestResult:
         with localcontext(_BACKTEST_CONTEXT):
             initial_cash = _money(initial_capital)
             result = self._run_single(
-                snapshot, period, strategy, initial_cash, commission_rate
+                snapshot, period, strategy, initial_cash, commission_rate, before_tool_call
             )
             baseline_result = self._run_single(
-                snapshot, period, baseline, initial_cash, commission_rate
+                snapshot, period, baseline, initial_cash, commission_rate, before_tool_call
             )
             metrics = replace(
                 result.metrics,
@@ -246,6 +248,7 @@ class BacktestEngine:
         strategy: StrategySpec,
         initial_cash: Decimal,
         commission_rate: Decimal,
+        before_tool_call: Callable[[], None] | None,
     ) -> BacktestResult:
         cash = initial_cash
         quantity = 0
@@ -327,6 +330,8 @@ class BacktestEngine:
             equity_curve.append(EquityPoint(bar.trading_date, equity))
             history.append(bar)
             position = Position.LONG if quantity else Position.FLAT
+            if before_tool_call is not None:
+                before_tool_call()
             result = self._execute_tool(strategy, tuple(history), position)
             signals.append(result)
             if result.signal is not Signal.INSUFFICIENT_DATA:
