@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from threading import Barrier
@@ -125,6 +126,115 @@ def test_job_itself_enforces_the_state_table(from_state, to_state):
         }
 
 
+STATE_PATHS = {
+    JobState.CREATED: (),
+    JobState.QUEUED: (JobState.QUEUED,),
+    JobState.RUNNING: (JobState.QUEUED, JobState.RUNNING),
+    JobState.COMPLETED: (JobState.QUEUED, JobState.RUNNING, JobState.COMPLETED),
+    JobState.FAILED: (JobState.QUEUED, JobState.RUNNING, JobState.FAILED),
+    JobState.CANCELED: (JobState.QUEUED, JobState.RUNNING, JobState.CANCELED),
+}
+
+
+def reach_state(service, job_id, state):
+    for step in STATE_PATHS[state]:
+        move(service, job_id, step)
+
+
+LIFECYCLE_OPERATIONS = (
+    ("enqueue", JobState.QUEUED, {JobState.CREATED}, (NOW,)),
+    ("start", JobState.RUNNING, {JobState.QUEUED}, ("worker-1", NOW)),
+    ("complete", JobState.COMPLETED, {JobState.RUNNING}, ("worker-1", RESULT, NOW)),
+    ("fail_to_start", JobState.FAILED, {JobState.QUEUED}, (START_FAILURE, NOW)),
+    ("fail", JobState.FAILED, {JobState.RUNNING}, ("worker-1", RUN_FAILURE, NOW)),
+    (
+        "cancel",
+        JobState.CANCELED,
+        {JobState.CREATED, JobState.QUEUED, JobState.RUNNING},
+        (NOW,),
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("from_state", "to_state", "operation", "arguments"),
+    [
+        pytest.param(state, target, name, args, id=f"{state}-{name}")
+        for name, target, allowed_states, args in LIFECYCLE_OPERATIONS
+        for state in JobState
+        if state not in allowed_states
+    ],
+)
+def test_forbidden_lifecycle_operations_leave_the_saved_job_unchanged(
+    lifecycle, from_state, to_state, operation, arguments
+):
+    service, repository, job_id = lifecycle
+    reach_state(service, job_id, from_state)
+    before = deepcopy(repository.get(job_id))
+    assert before.state is from_state
+    kwargs = (
+        {"lease_expires_at": LEASE, "deadline_at": DEADLINE}
+        if operation == "start"
+        else {}
+    )
+
+    with pytest.raises(InvalidTransition) as raised:
+        getattr(service, operation)(job_id, *arguments, **kwargs)
+
+    assert raised.value.code == "invalid_transition"
+    assert raised.value.details == {
+        "job_id": job_id,
+        "from_state": from_state.value,
+        "to_state": to_state.value,
+    }
+    assert repository.get(job_id) == before
+
+
+@pytest.mark.parametrize(
+    ("state", "code"),
+    [
+        (JobState.QUEUED, "tool_failed"),
+        (JobState.QUEUED, "job_timeout"),
+        (JobState.QUEUED, "unknown_failure"),
+        (JobState.QUEUED, ""),
+        (JobState.QUEUED, " \t "),
+        (JobState.RUNNING, "strategy_unavailable"),
+        (JobState.RUNNING, "worker_lost"),
+        (JobState.RUNNING, "unknown_failure"),
+        (JobState.RUNNING, ""),
+        (JobState.RUNNING, " \t "),
+    ],
+)
+def test_failure_code_of_another_stage_or_unknown_code_is_rejected(
+    lifecycle, state, code
+):
+    service, repository, job_id = lifecycle
+    reach_state(service, job_id, state)
+    before = deepcopy(repository.get(job_id))
+    failure = JobFailure(code, "Описание ошибки")
+
+    with pytest.raises(ValueError, match="Код ошибки"):
+        if state is JobState.QUEUED:
+            service.fail_to_start(job_id, failure, NOW)
+        else:
+            service.fail(job_id, "worker-1", failure, NOW)
+
+    assert repository.get(job_id) == before
+
+
+def test_worker_can_fail_job_when_dispatcher_detects_a_timeout(lifecycle):
+    service, repository, job_id = lifecycle
+    reach_state(service, job_id, JobState.RUNNING)
+    failure = JobFailure("job_timeout", "Истёк срок выполнения задания")
+
+    job = service.fail(job_id, "worker-1", failure, DEADLINE + timedelta(seconds=1))
+
+    assert repository.get(job_id) == job
+    assert job.error == failure
+    assert job.history[-1].actor == "worker"
+    assert job.history[-1].reason == failure.code
+
+
 @pytest.mark.parametrize(
     ("path", "actor"),
     [
@@ -243,6 +353,34 @@ def test_cancel_retries_if_worker_claimed_after_initial_read(lifecycle, monkeypa
     canceled = service.cancel(job_id, NOW)
     assert canceled.history[-1].from_state is JobState.RUNNING
     assert repository.get(job_id) == canceled
+
+
+def test_fail_to_start_does_not_fail_a_job_claimed_before_write(lifecycle, monkeypatch):
+    service, repository, job_id = lifecycle
+    service.enqueue(job_id, NOW)
+    compare_and_set = repository.compare_and_set
+    running = None
+
+    def start_before_write(*args, **kwargs):
+        nonlocal running
+        monkeypatch.setattr(repository, "compare_and_set", compare_and_set)
+        running = deepcopy(start(service, job_id))
+        return compare_and_set(*args, **kwargs)
+
+    monkeypatch.setattr(repository, "compare_and_set", start_before_write)
+
+    with pytest.raises(InvalidTransition) as raised:
+        service.fail_to_start(job_id, START_FAILURE, NOW)
+
+    assert raised.value.code == "invalid_transition"
+    assert raised.value.details == {
+        "job_id": job_id,
+        "from_state": "running",
+        "to_state": "failed",
+    }
+    assert running is not None
+    assert running.worker_id == "worker-1"
+    assert repository.get(job_id) == running
 
 
 def test_z3_late_result_and_error_leave_canceled_job_unchanged(lifecycle):

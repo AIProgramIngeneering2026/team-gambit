@@ -21,16 +21,17 @@ class Registry:
 
     def get(self, name: str, version: str | None = None) -> StrategyTool:
         """Без версии выбирает Tool для нового задания. С версией ищет точную пару."""
+        current_version = self._current.get(name)
+        if current_version is None:
+            raise ToolError(
+                "unknown_operation",
+                f"Стратегия {name} не зарегистрирована",
+                "strategy",
+                "unknown_operation",
+                allowed=tuple(sorted(self._current)),
+            )
         if version is None:
-            version = self._current.get(name)
-            if version is None:
-                raise ToolError(
-                    "unknown_operation",
-                    f"Стратегия {name} не зарегистрирована",
-                    "strategy",
-                    "unknown_operation",
-                    allowed=tuple(sorted(self._current)),
-                )
+            version = current_version
         tool = self._tools.get((name, version))
         if tool is None:
             raise ToolError(
