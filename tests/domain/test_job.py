@@ -1,23 +1,34 @@
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from threading import Barrier
 
 import pytest
 
-from tradelab.domain.job import (
+from tradelab.domain.backtest_types import (
     BacktestMetrics,
+    BacktestPeriod,
     BacktestResult,
     EquityPoint,
+    StrategySpec,
+    Trade,
+)
+from tradelab.domain.job import (
     InvalidTransition,
     Job,
     JobFailure,
     JobState,
-    Trade,
 )
 from tradelab.domain.job_lifecycle import JobLifecycle
 from tradelab.domain.job_repository import InMemoryJobRepository
+from tradelab.domain.strategy_tool import (
+    NormalizedParams,
+    Position,
+    Signal,
+    SignalReason,
+)
 
 NOW = datetime(2026, 11, 21, 10, tzinfo=UTC)
 LEASE = NOW + timedelta(seconds=30)
@@ -26,6 +37,10 @@ START_FAILURE = JobFailure("strategy_unavailable", "Сохранённая ве�
 RUN_FAILURE = JobFailure("tool_failed", "Стратегия завершилась ошибкой")
 CAPITAL = Decimal("1000.00")
 RESULT = BacktestResult(
+    snapshot_id="snapshot-1",
+    strategy=StrategySpec("example", "1.0.0", NormalizedParams({})),
+    period=BacktestPeriod(date(2026, 11, 19), date(2026, 11, 20)),
+    engine_version="1.0.0",
     metrics=BacktestMetrics(
         total_return=Decimal(0),
         buy_and_hold_return=Decimal(0),
@@ -37,20 +52,24 @@ RESULT = BacktestResult(
         win_rate=None,
         avg_position_return=None,
     ),
+    final_position=Position.LONG,
+    final_cash=Decimal(900),
+    final_quantity=10,
     equity_curve=(EquityPoint(date(2026, 11, 20), CAPITAL),),
     trades=(
         Trade(
-            side="BUY",
-            signal_date=date(2026, 11, 19),
-            execution_date=date(2026, 11, 20),
+            side=Signal.BUY,
+            signal_time=NOW - timedelta(days=2),
+            execution_time=NOW - timedelta(days=1),
             price=Decimal(10),
             quantity=10,
             commission=Decimal(0),
-            reason_code="enter",
-            reason_message="Вход в позицию",
+            cash_after=Decimal(900),
+            reason=SignalReason("enter", "Вход в позицию"),
             pnl=None,
         ),
     ),
+    signals=(),
 )
 
 
@@ -170,7 +189,8 @@ def test_forbidden_lifecycle_operations_leave_the_saved_job_unchanged(
 ):
     service, repository, job_id = lifecycle
     reach_state(service, job_id, from_state)
-    before = deepcopy(repository.get(job_id))
+    params = RESULT.strategy.normalized_params
+    before = deepcopy(repository.get(job_id), {id(params): NormalizedParams(params)})
     assert before.state is from_state
     kwargs = (
         {"lease_expires_at": LEASE, "deadline_at": DEADLINE}
@@ -469,6 +489,19 @@ def test_failed_completion_without_snapshot_does_not_partially_write(lifecycle):
         service.record_snapshot(job_id, "worker-1", "other")
     assert repository.get(job_id) == snapshot_recorded
 
-    completed = service.complete(job_id, "worker-1", RESULT, NOW)
+    result = replace(RESULT, snapshot_id="snapshot-2")
+    completed = service.complete(job_id, "worker-1", result, NOW)
     assert completed.snapshot_id == "snapshot-2"
-    assert completed.result == RESULT
+    assert completed.result == result
+
+
+def test_result_for_another_snapshot_cannot_complete_a_job(lifecycle):
+    service, repository, job_id = lifecycle
+    service.enqueue(job_id, NOW)
+    before = deepcopy(start(service, job_id))
+    result = replace(RESULT, snapshot_id="other-snapshot")
+
+    with pytest.raises(ValueError, match="снимок"):
+        service.complete(job_id, "worker-1", result, NOW)
+
+    assert repository.get(job_id) == before
