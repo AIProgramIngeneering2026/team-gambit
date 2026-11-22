@@ -56,16 +56,14 @@ class JobRunner:
                 now,
             )
 
-        if snapshot is None or (
-            job.snapshot_id is not None
-            and snapshot.snapshot_id != job.snapshot_id
+        if job.snapshot_id is not None and (
+            snapshot is None or snapshot.snapshot_id != job.snapshot_id
         ):
-            expected = job.snapshot_id or "неизвестный"
             return self._lifecycle.fail_to_start(
                 job_id,
                 JobFailure(
                     "snapshot_not_found",
-                    f"Сохранённый снимок {expected} недоступен",
+                    f"Сохранённый снимок {job.snapshot_id} недоступен",
                 ),
                 now,
             )
@@ -77,6 +75,38 @@ class JobRunner:
             lease_expires_at=lease_expires_at,
             deadline_at=deadline_at,
         )
+        if snapshot is None:
+            return self._fail_late_aware(
+                job_id,
+                worker_id,
+                JobFailure(
+                    "market_data_unavailable",
+                    "Поставщик данных не вернул снимок для нового задания",
+                ),
+                now,
+            )
+        if not snapshot.snapshot_id.strip():
+            return self._fail_late_aware(
+                job_id,
+                worker_id,
+                JobFailure(
+                    "invalid_market_data",
+                    "Снимок данных имеет пустой идентификатор",
+                ),
+                now,
+            )
+        if config.ticker != snapshot.instrument.ticker:
+            return self._fail_late_aware(
+                job_id,
+                worker_id,
+                JobFailure(
+                    "invalid_market_data",
+                    f"Тикер снимка {snapshot.instrument.ticker} не совпадает "
+                    f"с тикером задания {config.ticker}",
+                ),
+                now,
+            )
+
         recorded = self._lifecycle.record_snapshot(
             job_id, worker_id, snapshot.snapshot_id
         )
@@ -94,7 +124,7 @@ class JobRunner:
             )
         except ToolError as error:
             return self._fail_late_aware(
-                job_id, worker_id, JobFailure(error.code, error.message), now
+                job_id, worker_id, self._tool_failure(error), now
             )
         except Exception:
             return self._fail_late_aware(
@@ -104,10 +134,42 @@ class JobRunner:
                 now,
             )
 
+        if result is None:
+            return self._fail_late_aware(
+                job_id,
+                worker_id,
+                JobFailure("internal_error", "Движок не вернул результат бэктеста"),
+                now,
+            )
+
         try:
             return self._lifecycle.complete(job_id, worker_id, result, now)
         except InvalidTransition:
             return self._repository.get(job_id)
+
+    @staticmethod
+    def _tool_failure(error: ToolError) -> JobFailure:
+        code = error.code.strip() if isinstance(error.code, str) else ""
+        message = error.message if isinstance(error.message, str) else ""
+        if code in {
+            "market_data_unavailable",
+            "invalid_market_data",
+            "insufficient_data",
+            "tool_failed",
+            "internal_error",
+        } and message.strip():
+            return JobFailure(code, message)
+
+        label = code or "<пустой>"
+        if not message.strip():
+            return JobFailure(
+                "tool_failed",
+                f"StrategyTool вернул ошибку ({label}) без описания",
+            )
+        return JobFailure(
+            "tool_failed",
+            f"StrategyTool вернул недопустимый код ошибки {label}: {message}",
+        )
 
     def _fail_late_aware(
         self,
