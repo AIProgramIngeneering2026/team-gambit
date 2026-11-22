@@ -1,4 +1,6 @@
 import json
+from dataclasses import replace
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -9,6 +11,7 @@ from tradelab.domain.strategies import (
     SmaCrossoverTool,
     register_builtin_strategies,
 )
+from tradelab.domain.strategies.sma_crossover import _format_indicator
 from tradelab.domain.strategy_tool import Position, Signal, ToolError
 
 
@@ -100,26 +103,82 @@ def test_i32_2_buy_and_hold_rejects_any_field():
     }
 
 
-def test_i32_3_sma_control_signals(contract_bars, contract_cases):
-    case = contract_cases["backtests"][0]
-    tool = SmaCrossoverTool()
+@pytest.mark.parametrize(
+    "case_index", [0, 1], ids=["sma_crossover", "buy_and_hold"]
+)
+def test_i32_3_contract_control_signals(contract_bars, contract_cases, case_index):
+    case = contract_cases["backtests"][case_index]
+    registry = Registry()
+    register_builtin_strategies(registry)
+    tool = registry.get(case["strategy"], case["strategy_version"])
     params = tool.validate_params(case["params"])
-    positions = (
-        Position.FLAT,
-        Position.FLAT,
-        Position.FLAT,
-        Position.FLAT,
-        Position.FLAT,
-        Position.LONG,
-        Position.FLAT,
-    )
+    assert tool.required_bars(params) == case["required_bars"]
 
-    for index, position in enumerate(positions):
+    position = Position.FLAT
+    expected_results = zip(
+        case["expected_signals"],
+        case["expected_reason_codes"],
+        contract_bars,
+        strict=True,
+    )
+    for index, (expected_signal, expected_reason, bar) in enumerate(expected_results):
         result = tool.execute(contract_bars[: index + 1], position, params)
-        assert result.signal.value == case["expected_signals"][index]
-        assert result.reason.code == case["expected_reason_codes"][index]
+        assert result.signal.value == expected_signal
+        assert result.reason.code == expected_reason
         assert result.reason.message
-        assert result.bar_time == contract_bars[index].close_time
+        assert result.bar_time == bar.close_time
+        if expected_signal == "BUY":
+            position = Position.LONG
+        elif expected_signal == "SELL":
+            position = Position.FLAT
+
+
+def test_i32_5_sma_large_prices_format_all_indicators(contract_bars):
+    price = Decimal("999999999999999999.9999999999")
+    bars = tuple(
+        replace(bar, open=price, high=price, low=price, close=price)
+        for bar in contract_bars[:4]
+    )
+    tool = SmaCrossoverTool()
+    params = tool.validate_params({"fast": 2, "slow": 3})
+
+    result = tool.execute(bars, Position.FLAT, params)
+
+    assert result.signal is Signal.HOLD
+    assert result.reason.code == "no_cross"
+    assert result.bar_time == bars[-1].close_time
+    assert result.indicators == {
+        "fast_previous": "1000000000000000000",
+        "slow_previous": "1000000000000000000",
+        "fast_current": "1000000000000000000",
+        "slow_current": "1000000000000000000",
+    }
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (Decimal("123.45678901234"), "123.4567890123"),
+        (Decimal("0.000000000049"), "0"),
+        (Decimal("0.000000000051"), "0.0000000001"),
+        (Decimal("1.00000000005"), "1"),
+        (Decimal("1.00000000015"), "1.0000000002"),
+        (
+            Decimal("999999999999999999.99999999996"),
+            "1000000000000000000",
+        ),
+    ],
+    ids=[
+        "ordinary",
+        "tiny_below_half",
+        "tiny_above_half",
+        "half_even_down",
+        "half_even_up",
+        "carry_into_integer",
+    ],
+)
+def test_i32_5_indicator_formatting_uses_decimal_rounding_rules(value, expected):
+    assert _format_indicator(value) == expected
 
 
 def test_i32_3_sma_cross_up_indicators_match_contract_example(contract_bars):
