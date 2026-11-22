@@ -10,7 +10,7 @@ from tradelab.domain.strategy_tool import Candle
 
 @pytest.fixture
 def contract_cases():
-    path = Path(__file__).parents[2] / "docs" / "examples" / "strategy-tool-cases.json"
+    path = Path(__file__).parents[1] / "docs" / "examples" / "strategy-tool-cases.json"
     return json.loads(path.read_text(encoding="utf-8"))
 
 
