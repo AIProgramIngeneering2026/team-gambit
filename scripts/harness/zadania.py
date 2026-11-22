@@ -97,7 +97,7 @@ def brief(zdir: Path, n: int, cfg: dict) -> dict:
     template = zdir / "templates" / f"p{n}.md"
     deadline = parse_deadline(text, now())
     report = zdir / "teams" / slug / f"p{n}.md"
-    links = sorted({l for l in LINK.findall(text) if not l.startswith("http")})
+    links = sorted({link for link in LINK.findall(text) if not link.startswith("http")})
     return {
         "practice": f"p{n}",
         "title": text.splitlines()[0].lstrip("# ").strip(),
@@ -112,8 +112,8 @@ def brief(zdir: Path, n: int, cfg: dict) -> dict:
         "report_in_main": report.exists(),
         "review": review_pair(zdir, n, slug),
         "reviewed_by": reviewed_by(zdir, n, slug),
-        "linked_files": [str((task_path.parent / l).resolve().relative_to(zdir)) for l in links
-                         if (task_path.parent / l).exists()],
+        "linked_files": [str((task_path.parent / link).resolve().relative_to(zdir)) for link in links
+                         if (task_path.parent / link).exists()],
     }
 
 
