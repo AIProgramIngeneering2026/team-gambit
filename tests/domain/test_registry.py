@@ -87,12 +87,13 @@ def test_registry_registers_and_resolves_an_arbitrary_tool():
         result.indicators["test"] = "2"
 
 
-def test_unknown_operation_lists_available_strategies():
+@pytest.mark.parametrize("version", [None, "1.0.0"])
+def test_unknown_operation_lists_available_strategies(version):
     registry = Registry()
     registry.register(ExampleTool("1.0.0"))
 
     with pytest.raises(ToolError) as raised:
-        registry.get("unknown")
+        registry.get("unknown", version)
     assert raised.value.code == "unknown_operation"
     assert raised.value.details == {
         "field": "strategy",
@@ -111,11 +112,21 @@ def test_registry_resolves_saved_versions_without_switching_to_current():
 
     assert registry.get("example") is second
     assert registry.get("example", "1.0.0") is first
-    for name in ("example", "removed_strategy"):
-        with pytest.raises(ToolError) as raised:
-            registry.get(name, "0.9.0")
-        assert raised.value.code == "strategy_unavailable"
-        assert raised.value.details["field"] == "strategy.version"
+
+
+def test_missing_version_of_a_known_strategy_is_unavailable():
+    registry = Registry()
+    registry.register(ExampleTool("1.0.0"))
+
+    with pytest.raises(ToolError) as raised:
+        registry.get("example", "0.9.0")
+    assert raised.value.code == "strategy_unavailable"
+    assert raised.value.details == {
+        "field": "strategy.version",
+        "reason": "strategy_unavailable",
+        "name": "example",
+        "version": "0.9.0",
+    }
 
 
 def test_duplicate_pair_does_not_replace_registration_or_current_version():
