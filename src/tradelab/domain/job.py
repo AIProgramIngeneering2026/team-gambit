@@ -4,6 +4,8 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Literal
 
+from .backtest import BacktestPeriod, StrategySpec
+
 
 class JobState(StrEnum):
     CREATED = "created"
@@ -102,6 +104,17 @@ class BacktestResult:
 
 
 @dataclass(frozen=True, slots=True)
+class BacktestJobConfig:
+    ticker: str
+    period: BacktestPeriod
+    strategy: StrategySpec
+    baseline: StrategySpec
+    initial_capital: Decimal
+    commission_rate: Decimal
+    engine_version: str
+
+
+@dataclass(frozen=True, slots=True)
 class Job:
     id: str
     created_at: datetime
@@ -115,6 +128,7 @@ class Job:
     finished_at: datetime | None = None
     result: BacktestResult | None = None
     error: JobFailure | None = None
+    config: BacktestJobConfig | None = None
 
     def __post_init__(self) -> None:
         history = tuple(self.history)
