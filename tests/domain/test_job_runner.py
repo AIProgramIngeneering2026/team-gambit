@@ -12,7 +12,13 @@ from tradelab.domain.backtest import (
     StrategySpec,
 )
 from tradelab.domain.dispatcher import Dispatcher
-from tradelab.domain.job import BacktestJobConfig, InvalidTransition, Job, JobState
+from tradelab.domain.job import (
+    BacktestJobConfig,
+    InvalidTransition,
+    Job,
+    JobFailure,
+    JobState,
+)
 from tradelab.domain.job_lifecycle import JobLifecycle
 from tradelab.domain.job_repository import InMemoryJobRepository
 from tradelab.domain.job_runner import JobRunner
@@ -446,3 +452,243 @@ def test_terminal_start_claim_is_not_masked(snapshot, registry, tool):
 
     assert repository.get(JOB_ID) is canceled
     assert tool.calls == []
+
+
+def assert_running_failure(job, code):
+    assert job.state is JobState.FAILED
+    assert job.error.code == code
+    assert job.error.message.strip()
+    assert job.result is None
+    assert job.worker_id == WORKER_ID
+    assert job.started_at == NOW
+    assert job.finished_at == NOW
+    assert [entry.to_state for entry in job.history] == [
+        JobState.CREATED,
+        JobState.QUEUED,
+        JobState.RUNNING,
+        JobState.FAILED,
+    ]
+
+
+def test_snapshot_ticker_mismatch_fails_after_start_before_any_tool(
+    snapshot, registry, tool
+):
+    repository = InMemoryJobRepository()
+    config = replace(make_config(snapshot), ticker="OTHER")
+    add_queued_job(repository, config)
+    runner, _ = make_runner(repository, registry)
+
+    failed = run(runner, snapshot)
+
+    assert_running_failure(failed, "invalid_market_data")
+    assert failed.snapshot_id is None
+    assert tool.calls == []
+
+
+def test_fresh_missing_snapshot_is_market_data_failure_after_start(
+    snapshot, registry, tool
+):
+    repository = InMemoryJobRepository()
+    add_queued_job(repository, make_config(snapshot))
+    runner, _ = make_runner(repository, registry)
+
+    failed = run(runner, None)
+
+    assert_running_failure(failed, "market_data_unavailable")
+    assert failed.snapshot_id is None
+    assert tool.calls == []
+
+
+def test_empty_snapshot_id_fails_after_start_before_record_and_tool(
+    snapshot, registry, tool
+):
+    repository = InMemoryJobRepository()
+    add_queued_job(repository, make_config(snapshot))
+    runner, _ = make_runner(repository, registry)
+
+    failed = run(runner, replace(snapshot, snapshot_id=""))
+
+    assert_running_failure(failed, "invalid_market_data")
+    assert failed.snapshot_id is None
+    assert tool.calls == []
+
+
+class EmptyResultEngine:
+    version = BacktestEngine.version
+
+    def run(self, *args, **kwargs):
+        return None
+
+
+def test_none_engine_result_becomes_internal_error_instead_of_staying_running(
+    snapshot, registry, tool
+):
+    repository = InMemoryJobRepository()
+    add_queued_job(repository, make_config(snapshot))
+    runner, _ = make_runner(repository, registry, EmptyResultEngine())
+
+    failed = run(runner, snapshot)
+
+    assert_running_failure(failed, "internal_error")
+    assert tool.calls == []
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "market_data_unavailable",
+        "invalid_market_data",
+        "insufficient_data",
+        "tool_failed",
+        "internal_error",
+    ],
+)
+def test_allowed_execution_tool_error_codes_are_preserved(
+    snapshot, registry, tool, code
+):
+    tool.error = ToolError(code, f"Доменное сообщение: {code}", "tool.result", "domain")
+    repository = InMemoryJobRepository()
+    add_queued_job(repository, make_config(snapshot))
+    runner, _ = make_runner(repository, registry)
+
+    failed = run(runner, snapshot)
+
+    assert_running_failure(failed, code)
+    assert failed.error.message == f"Доменное сообщение: {code}"
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "unknown_operation",
+        "invalid_params",
+        "strategy_unavailable",
+        "engine_unavailable",
+        "snapshot_not_found",
+        "job_timeout",
+        "worker_lost",
+        "made_up",
+    ],
+)
+def test_forbidden_unknown_and_reaper_tool_error_codes_become_tool_failed(
+    snapshot, registry, tool, code
+):
+    tool.error = ToolError(code, "Недопустимая ошибка Tool", "tool.result", "domain")
+    repository = InMemoryJobRepository()
+    add_queued_job(repository, make_config(snapshot))
+    runner, _ = make_runner(repository, registry)
+
+    failed = run(runner, snapshot)
+
+    assert_running_failure(failed, "tool_failed")
+    assert code in failed.error.message
+
+
+@pytest.mark.parametrize(
+    ("code", "message"),
+    [
+        ("", "Код ошибки не задан"),
+        ("tool_failed", ""),
+        ("insufficient_data", " "),
+        ("made_up", ""),
+    ],
+)
+def test_malformed_tool_error_never_leaves_job_running(
+    snapshot, registry, tool, code, message
+):
+    tool.error = ToolError(code, message, "tool.result", "domain")
+    repository = InMemoryJobRepository()
+    add_queued_job(repository, make_config(snapshot))
+    runner, _ = make_runner(repository, registry)
+
+    failed = run(runner, snapshot)
+
+    assert_running_failure(failed, "tool_failed")
+
+
+def test_configless_job_remains_explicit_programming_error(snapshot, registry):
+    repository = InMemoryJobRepository()
+    queued = add_queued_job(repository, None)
+    runner, _ = make_runner(repository, registry)
+
+    with pytest.raises(ValueError, match="конфигурация"):
+        run(runner, snapshot)
+
+    assert repository.get(JOB_ID) is queued
+    assert queued.state is JobState.QUEUED
+
+
+@pytest.mark.parametrize("terminal", ["canceled", "failed", "worker_lost"])
+@pytest.mark.parametrize("outcome", ["success", "tool_failure"])
+def test_real_terminal_transition_inside_tool_discards_late_response(
+    snapshot, registry, tool, terminal, outcome, monkeypatch
+):
+    if outcome == "tool_failure":
+        tool.error = RuntimeError("Поздняя ошибка из Tool")
+    repository = InMemoryJobRepository()
+    add_queued_job(repository, make_config(snapshot))
+    runner, lifecycle = make_runner(repository, registry)
+    terminal_jobs = []
+
+    def make_terminal():
+        if terminal == "canceled":
+            terminal_jobs.append(lifecycle.cancel(JOB_ID, NOW))
+        elif terminal == "failed":
+            terminal_jobs.append(
+                lifecycle.fail(
+                    JOB_ID,
+                    WORKER_ID,
+                    JobFailure("internal_error", "Внешний сбой выполнения"),
+                    NOW,
+                )
+            )
+        else:
+            terminal_jobs.append(
+                lifecycle.recover_expired(JOB_ID, LEASE + timedelta(microseconds=1))
+            )
+
+    execute = tool.execute
+
+    def execute_with_real_transition(*args):
+        make_terminal()
+        return execute(*args)
+
+    monkeypatch.setattr(tool, "execute", execute_with_real_transition)
+
+    returned = run(runner, snapshot)
+
+    terminal_job = terminal_jobs[0]
+    assert returned is terminal_job
+    assert repository.get(JOB_ID) is terminal_job
+    assert returned.result is None
+    assert returned.history == terminal_job.history
+    if terminal == "canceled":
+        assert returned.error is None
+    elif terminal == "failed":
+        assert returned.error.message == "Внешний сбой выполнения"
+    else:
+        assert returned.error.code == "worker_lost"
+    assert tool.calls
+
+
+def test_repository_exception_during_completion_is_not_masked(
+    snapshot, registry, tool, monkeypatch
+):
+    repository = InMemoryJobRepository()
+    add_queued_job(repository, make_config(snapshot))
+    runner, _ = make_runner(repository, registry)
+    compare_and_set = repository.compare_and_set
+    running_writes = 0
+
+    def fail_final_write(job_id, expected_state, change, **kwargs):
+        nonlocal running_writes
+        if expected_state is JobState.RUNNING:
+            running_writes += 1
+            if running_writes == 2:
+                raise RuntimeError("Репозиторий недоступен")
+        return compare_and_set(job_id, expected_state, change, **kwargs)
+
+    monkeypatch.setattr(repository, "compare_and_set", fail_final_write)
+
+    with pytest.raises(RuntimeError, match="Репозиторий недоступен"):
+        run(runner, snapshot)
