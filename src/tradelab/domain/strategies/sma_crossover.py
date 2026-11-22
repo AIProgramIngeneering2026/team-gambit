@@ -47,12 +47,18 @@ def _average(values: Sequence[Decimal]) -> Decimal:
 
 
 def _format_indicator(value: Decimal) -> str:
-    rounded = value.quantize(_INDICATOR_QUANTUM, rounding=ROUND_HALF_EVEN)
-    if not rounded.is_finite():
-        raise ValueError("Индикатор SMA не является конечным числом")
-    if rounded == 0:
-        return "0"
-    return format(rounded.normalize(), "f")
+    required_precision = (
+        value.adjusted() - _INDICATOR_QUANTUM.as_tuple().exponent + 2
+    )
+    with localcontext() as context:
+        context.prec = max(28, required_precision)
+        context.rounding = ROUND_HALF_EVEN
+        rounded = value.quantize(_INDICATOR_QUANTUM, rounding=ROUND_HALF_EVEN)
+        if not rounded.is_finite():
+            raise ValueError("Индикатор SMA не является конечным числом")
+        if rounded == 0:
+            return "0"
+        return format(rounded.normalize(), "f")
 
 
 class SmaCrossoverTool:
