@@ -1,7 +1,7 @@
 import re
 from collections.abc import Callable
 from datetime import UTC, date, datetime
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, localcontext
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -125,7 +125,9 @@ class JobService:
         )
         baseline_tool = self._registry.get("buy_and_hold")
         baseline_params = baseline_tool.validate_params({})
-        capital = capital.quantize(_MONEY_QUANTUM, rounding=ROUND_HALF_UP)
+        with localcontext() as context:
+            context.prec = 28
+            capital = capital.quantize(_MONEY_QUANTUM, rounding=ROUND_HALF_UP)
 
         config = BacktestJobConfig(
             ticker=normalized_ticker,

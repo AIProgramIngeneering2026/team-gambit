@@ -1,6 +1,6 @@
 from dataclasses import FrozenInstanceError
 from datetime import UTC, date, datetime
-from decimal import Decimal
+from decimal import Decimal, localcontext
 
 import pytest
 
@@ -231,3 +231,16 @@ def test_c1_1_valid_job_stores_normalized_config_and_exact_versions(service_part
 
 def test_job_config_remains_optional_for_existing_job_fixtures():
     assert Job(JOB_ID, NOW).config is None
+
+
+def test_c1_1_capital_quantization_isolates_caller_decimal_context(service_parts):
+    service, repository = service_parts
+    with localcontext() as context:
+        context.prec = 5
+        job = create(service, initial_capital="100000.009")
+
+        assert job.state is JobState.QUEUED
+        assert job.config is not None
+        assert job.config.initial_capital == Decimal("100000.01")
+        assert context.prec == 5
+    assert repository.get(JOB_ID) is job
