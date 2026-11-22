@@ -37,8 +37,8 @@ def window(zdir: Path, n: int, cfg: dict) -> tuple[datetime, datetime]:
 
 
 def in_practice(pr: dict, label: str, start: datetime, end: datetime) -> bool:
-    labels = {l["name"] for l in pr.get("labels", [])}
-    if any(l.startswith("practice:") for l in labels):
+    labels = {label_info["name"] for label_info in pr.get("labels", [])}
+    if any(label_name.startswith("practice:") for label_name in labels):
         return label in labels
     moment = parse_time(pr.get("mergedAt")) or parse_time(pr.get("createdAt"))
     return bool(moment and start < moment <= end)
@@ -103,7 +103,8 @@ def collect(n: int) -> dict:
 
     issues = gh_json("issue", "list", "-R", repo, "--label", label, "--state", "all", "--limit", "200",
                      "--json", "number,title,state,url,assignees,labels")
-    tracking = [i for i in issues if any(l["name"] == cfg["labels"]["tracking"] for l in i["labels"])]
+    tracking = [i for i in issues if any(label_info["name"] == cfg["labels"]["tracking"]
+                                        for label_info in i["labels"])]
     questions = gh_json("issue", "list", "-R", repo, "--label", cfg["labels"]["question"], "--state", "open",
                         "--limit", "100", "--json", "number,title,url,labels,createdAt")
     prs = team_prs(cfg, label, start, end)
@@ -145,7 +146,8 @@ def collect(n: int) -> dict:
         "tracking_issue": tracking[0]["url"] if tracking else None,
         "issues": [{"number": i["number"], "title": i["title"], "state": i["state"], "url": i["url"],
                     "assignees": [a["login"] for a in i["assignees"]],
-                    "labels": [l["name"] for l in i["labels"]]} for i in issues if i not in tracking],
+                    "labels": [label_info["name"] for label_info in i["labels"]]}
+                   for i in issues if i not in tracking],
         "prs": [{"number": p["number"], "title": p["title"], "url": p["url"], "author": p["author"]["login"],
                  "state": p["state"], "draft": p["isDraft"], "review_decision": p["reviewDecision"],
                  "requested": [r.get("login") for r in p["reviewRequests"]],
@@ -186,8 +188,8 @@ def render(data: dict) -> str:
     out += ["", "## Вклад участников", render_contrib(data), "", "## Вопросы к команде"]
     out += [f"- #{q['number']} {q['title']}" for q in data["open_questions"]] or ["- нет"]
     out += ["", "## Отчёт в Zadania"]
-    out += [f"- {p['url']} [{p['state']}] {', '.join(l['name'] for l in p['labels'])}" for p in data["report_prs"]] \
-        or ["- PR не открыт"]
+    out += [f"- {p['url']} [{p['state']}] {', '.join(label_info['name'] for label_info in p['labels'])}"
+            for p in data["report_prs"]] or ["- PR не открыт"]
     return "\n".join(out)
 
 
