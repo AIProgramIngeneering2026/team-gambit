@@ -10,6 +10,15 @@ from .registry import Registry
 from .strategy_tool import ToolError
 
 
+_TIMEOUT_FAILURE = JobFailure("job_timeout", "Истёк срок выполнения задания")
+
+
+class _DeadlineExceeded(Exception):
+    def __init__(self, at: datetime) -> None:
+        super().__init__()
+        self.at = at
+
+
 def _utc_now() -> datetime:
     return datetime.now(UTC)
 
@@ -121,6 +130,13 @@ class JobRunner:
         if recorded is None:
             return self._repository.get(job_id)
 
+        def check_deadline() -> None:
+            checked_at = self._clock()
+            if checked_at > deadline_at:
+                raise _DeadlineExceeded(checked_at)
+
+        result = None
+        failure = None
         try:
             result = self._engine.run(
                 snapshot=snapshot,
@@ -129,26 +145,24 @@ class JobRunner:
                 baseline=config.baseline,
                 initial_capital=config.initial_capital,
                 commission_rate=config.commission_rate,
-                clock=self._clock,
-                deadline_at=deadline_at,
+                before_tool_call=check_deadline,
+            )
+        except _DeadlineExceeded as error:
+            return self._fail_late_aware(
+                job_id, worker_id, _TIMEOUT_FAILURE, error.at
             )
         except ToolError as error:
-            finished_at = self._clock()
-            if error.code == "job_timeout" and deadline_at < finished_at:
-                failure = JobFailure("job_timeout", "Истёк срок выполнения задания")
-            else:
-                failure = self._tool_failure(error)
-            return self._fail_late_aware(
-                job_id, worker_id, failure, finished_at
-            )
+            failure = self._tool_failure(error)
         except Exception:
-            return self._fail_late_aware(
-                job_id,
-                worker_id,
-                JobFailure("internal_error", "Неожиданная ошибка выполнения задания"),
-                self._clock(),
+            failure = JobFailure(
+                "internal_error", "Неожиданная ошибка выполнения задания"
             )
 
+        finished_at = self._clock()
+        if finished_at > deadline_at:
+            failure = _TIMEOUT_FAILURE
+        if failure is not None:
+            return self._fail_late_aware(job_id, worker_id, failure, finished_at)
         if (
             not isinstance(result, BacktestResult)
             or result.snapshot_id != recorded.snapshot_id
@@ -159,15 +173,6 @@ class JobRunner:
                 JobFailure(
                     "internal_error", "Движок вернул некорректный результат бэктеста"
                 ),
-                self._clock(),
-            )
-
-        finished_at = self._clock()
-        if deadline_at < finished_at:
-            return self._fail_late_aware(
-                job_id,
-                worker_id,
-                JobFailure("job_timeout", "Истёк срок выполнения задания"),
                 finished_at,
             )
 

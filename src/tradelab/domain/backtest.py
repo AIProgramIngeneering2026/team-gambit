@@ -203,8 +203,7 @@ class BacktestEngine:
         initial_capital: Decimal,
         commission_rate: Decimal,
         *,
-        clock: Callable[[], datetime] | None = None,
-        deadline_at: datetime | None = None,
+        before_tool_call: Callable[[], None] | None = None,
     ) -> BacktestResult:
         with localcontext(_BACKTEST_CONTEXT):
             initial_cash = _money(initial_capital)
@@ -214,8 +213,7 @@ class BacktestEngine:
                 strategy,
                 initial_cash,
                 commission_rate,
-                clock=clock,
-                deadline_at=deadline_at,
+                before_tool_call,
             )
             baseline_result = self._run_single(
                 snapshot,
@@ -223,8 +221,7 @@ class BacktestEngine:
                 baseline,
                 initial_cash,
                 commission_rate,
-                clock=clock,
-                deadline_at=deadline_at,
+                before_tool_call,
             )
             metrics = replace(
                 result.metrics,
@@ -237,17 +234,7 @@ class BacktestEngine:
         strategy: StrategySpec,
         closed_bars: tuple[Candle, ...],
         position: Position,
-        *,
-        clock: Callable[[], datetime] | None,
-        deadline_at: datetime | None,
     ) -> ToolResult:
-        if clock is not None and deadline_at is not None and deadline_at < clock():
-            raise ToolError(
-                "job_timeout",
-                "Истёк срок выполнения задания",
-                "deadline_at",
-                "job_timeout",
-            )
         try:
             result = self._dispatcher.execute(
                 strategy.name,
@@ -271,9 +258,7 @@ class BacktestEngine:
         strategy: StrategySpec,
         initial_cash: Decimal,
         commission_rate: Decimal,
-        *,
-        clock: Callable[[], datetime] | None = None,
-        deadline_at: datetime | None = None,
+        before_tool_call: Callable[[], None] | None,
     ) -> BacktestResult:
         cash = initial_cash
         quantity = 0
@@ -355,13 +340,9 @@ class BacktestEngine:
             equity_curve.append(EquityPoint(bar.trading_date, equity))
             history.append(bar)
             position = Position.LONG if quantity else Position.FLAT
-            result = self._execute_tool(
-                strategy,
-                tuple(history),
-                position,
-                clock=clock,
-                deadline_at=deadline_at,
-            )
+            if before_tool_call is not None:
+                before_tool_call()
+            result = self._execute_tool(strategy, tuple(history), position)
             signals.append(result)
             if result.signal is not Signal.INSUFFICIENT_DATA:
                 has_usable_bar = True
