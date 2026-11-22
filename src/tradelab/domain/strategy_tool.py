@@ -93,10 +93,22 @@ class ToolError(Exception):
     def __init__(
         self, code: str, message: str, field: str, reason: str, **details: ParamValue
     ) -> None:
-        self.code = code
-        self.message = message
-        self.details = NormalizedParams({"field": field, "reason": reason, **details})
+        self._code = code
+        self._message = message
+        self._details = NormalizedParams({"field": field, "reason": reason, **details})
         super().__init__(message)
+
+    @property
+    def code(self) -> str:
+        return self._code
+
+    @property
+    def message(self) -> str:
+        return self._message
+
+    @property
+    def details(self) -> Mapping[str, ParamValue]:
+        return self._details
 
 
 class StrategyTool(Protocol):

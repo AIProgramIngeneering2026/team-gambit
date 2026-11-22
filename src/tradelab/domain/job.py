@@ -2,7 +2,7 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Literal
+from typing import Literal, TypeAlias, get_args
 
 from .backtest import BacktestPeriod, StrategySpec
 
@@ -28,6 +28,23 @@ _TRANSITIONS = {
 }
 
 Actor = Literal["user", "worker", "reaper"]
+StartFailureCode: TypeAlias = Literal[
+    "strategy_unavailable", "engine_unavailable", "snapshot_not_found"
+]
+WorkerFailureCode: TypeAlias = Literal[
+    "market_data_unavailable",
+    "invalid_market_data",
+    "insufficient_data",
+    "tool_failed",
+    "internal_error",
+    "job_timeout",
+]
+RecoveryFailureCode: TypeAlias = Literal["worker_lost", "job_timeout"]
+JobFailureCode: TypeAlias = StartFailureCode | WorkerFailureCode | RecoveryFailureCode
+
+_START_FAILURE_CODES = get_args(StartFailureCode)
+_WORKER_FAILURE_CODES = get_args(WorkerFailureCode)
+_RECOVERY_FAILURE_CODES = get_args(RecoveryFailureCode)
 
 
 class InvalidTransition(Exception):
@@ -56,7 +73,7 @@ class StateTransition:
 
 @dataclass(frozen=True, slots=True)
 class JobFailure:
-    code: str
+    code: JobFailureCode
     message: str
 
 
@@ -212,15 +229,23 @@ class Job:
     def fail_to_start(self, error: JobFailure, now: datetime) -> "Job":
         if self.state is not JobState.QUEUED:
             raise InvalidTransition(self.id, self.state, JobState.FAILED)
-        return self._fail(error, now, "worker")
+        return self._fail(error, now, "worker", _START_FAILURE_CODES)
 
     def fail(self, worker_id: str, error: JobFailure, now: datetime) -> "Job":
         self._require_worker(worker_id, JobState.FAILED)
-        return self._fail(error, now, "worker")
+        return self._fail(error, now, "worker", _WORKER_FAILURE_CODES)
 
-    def _fail(self, error: JobFailure, now: datetime, actor: Actor) -> "Job":
-        if not error or not error.code or not error.message:
-            raise ValueError("Для ошибки задания нужны код и описание")
+    def _fail(
+        self,
+        error: JobFailure,
+        now: datetime,
+        actor: Actor,
+        allowed_codes: tuple[JobFailureCode, ...],
+    ) -> "Job":
+        if error is None or error.code not in allowed_codes:
+            raise ValueError("Код ошибки недопустим для этого этапа задания")
+        if not error.message.strip():
+            raise ValueError("Для ошибки задания нужно описание")
         return self._transition(
             JobState.FAILED, now, actor, error=error, finished_at=now
         )
@@ -260,9 +285,13 @@ class Job:
                 JobFailure("job_timeout", "Истёк срок выполнения задания"),
                 now,
                 "reaper",
+                _RECOVERY_FAILURE_CODES,
             )
         if lease is not None and lease < now:
             return self._fail(
-                JobFailure("worker_lost", "Истекла аренда задания"), now, "reaper"
+                JobFailure("worker_lost", "Истекла аренда задания"),
+                now,
+                "reaper",
+                _RECOVERY_FAILURE_CODES,
             )
         return None
