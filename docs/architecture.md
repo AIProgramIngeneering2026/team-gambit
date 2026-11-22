@@ -174,7 +174,8 @@ stateDiagram-v2
 | `queued → canceled` | JobService | Пользователь отменил задание из очереди | — |
 | `queued → failed` | JobRunner | Задание нельзя начать: версия стратегии недоступна (`strategy_unavailable`), версия движка недоступна (`engine_unavailable`), снимок для повторного запуска не найден (`snapshot_not_found`) | Код и описание ошибки |
 | `running → completed` | JobRunner | Движок рассчитал результат | `BacktestResult`, сделки; `snapshot_id` уже записан при получении снимка (§3.8) |
-| `running → failed` | JobRunner или Reaper | Ошибка выполнения (`market_data_unavailable`, `invalid_market_data`, `insufficient_data`, `tool_failed`, `internal_error`), превышен срок (`job_timeout`), worker пропал (`worker_lost`) | Код и описание ошибки |
+| `running → failed` | JobRunner | Ошибка выполнения (`market_data_unavailable`, `invalid_market_data`, `insufficient_data`, `tool_failed`, `internal_error`) или обнаружено превышение срока (`job_timeout`) | Код и описание ошибки |
+| `running → failed` | Reaper | Истекла аренда worker (`worker_lost`) или срок выполнения (`job_timeout`) | Код и описание ошибки |
 | `running → canceled` | JobService | Пользователь отменил выполняющееся задание | — |
 
 В MVP задание сохраняется и ставится в очередь одной транзакцией — и одиночное, и все задания сравнения (раздел 3.7), — поэтому через API состояние `created` не наблюдается и переход `created → canceled` на практике не встречается. Он остаётся в согласованной модели состояний на случай отложенной постановки в очередь.
