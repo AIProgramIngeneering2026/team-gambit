@@ -26,7 +26,9 @@ class BuyAndHoldTool:
     name = "buy_and_hold"
     version = "1.0.0"
     title = "Buy & hold"
-    description = "Покупка на первом закрытом баре и удержание позиции"
+    description = (
+        "Сигнал на покупку после закрытия первого бара и удержание открытой позиции"
+    )
 
     def params_schema(self) -> Mapping[str, ParamValue]:
         return deepcopy(_PARAMS_SCHEMA)

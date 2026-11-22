@@ -1,7 +1,8 @@
 from collections.abc import Callable
 from datetime import datetime
 
-from .job import BacktestResult, InvalidTransition, Job, JobFailure, JobState
+from .backtest_types import BacktestResult
+from .job import InvalidTransition, Job, JobFailure, JobState
 from .job_repository import JobRepository
 
 
