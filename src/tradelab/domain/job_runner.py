@@ -60,7 +60,7 @@ class JobRunner:
             return self._lifecycle.fail_to_start(
                 job_id,
                 JobFailure("strategy_unavailable", error.message),
-                now,
+                self._clock(),
             )
 
         if config.engine_version != self._engine.version:
@@ -70,7 +70,7 @@ class JobRunner:
                     "engine_unavailable",
                     f"Сохранённая версия {config.engine_version} движка недоступна",
                 ),
-                now,
+                self._clock(),
             )
 
         if job.snapshot_id is not None and (
@@ -82,7 +82,7 @@ class JobRunner:
                     "snapshot_not_found",
                     f"Сохранённый снимок {job.snapshot_id} недоступен",
                 ),
-                now,
+                self._clock(),
             )
 
         self._lifecycle.start(
@@ -100,7 +100,7 @@ class JobRunner:
                     "market_data_unavailable",
                     "Поставщик данных не вернул снимок для нового задания",
                 ),
-                now,
+                self._clock(),
             )
         if not snapshot.snapshot_id.strip():
             return self._fail_late_aware(
@@ -110,7 +110,7 @@ class JobRunner:
                     "invalid_market_data",
                     "Снимок данных имеет пустой идентификатор",
                 ),
-                now,
+                self._clock(),
             )
         if config.ticker != snapshot.instrument.ticker:
             return self._fail_late_aware(
@@ -121,7 +121,7 @@ class JobRunner:
                     f"Тикер снимка {snapshot.instrument.ticker} не совпадает "
                     f"с тикером задания {config.ticker}",
                 ),
-                now,
+                self._clock(),
             )
 
         recorded = self._lifecycle.record_snapshot(
@@ -163,11 +163,16 @@ class JobRunner:
             failure = _TIMEOUT_FAILURE
         if failure is not None:
             return self._fail_late_aware(job_id, worker_id, failure, finished_at)
-        if not isinstance(result, BacktestResult) or result.snapshot_id != snapshot.snapshot_id:
+        if (
+            not isinstance(result, BacktestResult)
+            or result.snapshot_id != recorded.snapshot_id
+        ):
             return self._fail_late_aware(
                 job_id,
                 worker_id,
-                JobFailure("internal_error", "Движок вернул некорректный результат бэктеста"),
+                JobFailure(
+                    "internal_error", "Движок вернул некорректный результат бэктеста"
+                ),
                 finished_at,
             )
 

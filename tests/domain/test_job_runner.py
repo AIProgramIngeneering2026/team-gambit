@@ -78,8 +78,7 @@ class RecordingEngine:
         baseline,
         initial_capital,
         commission_rate,
-        *,
-        before_tool_call=None,
+        **run_options,
     ):
         self.calls.append(
             (
@@ -100,7 +99,7 @@ class RecordingEngine:
             baseline,
             initial_capital,
             commission_rate,
-            before_tool_call=before_tool_call,
+            **run_options,
         )
 
 
@@ -461,7 +460,7 @@ def test_terminal_start_claim_is_not_masked(snapshot, registry, tool):
     assert tool.calls == []
 
 
-def assert_running_failure(job, code, *, finished_at=NOW):
+def assert_running_failure(job, code, finished_at=NOW):
     assert job.state is JobState.FAILED
     assert job.error.code == code
     assert job.error.message.strip()
@@ -786,3 +785,204 @@ def test_repository_exception_during_completion_is_not_masked(
 
     with pytest.raises(RuntimeError, match="Репозиторий недоступен"):
         run(runner, snapshot)
+
+
+class StaticResultEngine:
+    version = BacktestEngine.version
+
+    def __init__(self, result):
+        self.result = result
+        self.calls = 0
+
+    def run(self, *args, **kwargs):
+        self.calls += 1
+        return self.result
+
+
+class ControlledClock:
+    def __init__(self):
+        self.now = NOW
+
+    def __call__(self):
+        return self.now
+
+
+def make_timed_runner(repository, registry, clock, engine=None):
+    lifecycle = JobLifecycle(repository)
+    if engine is None:
+        engine = BacktestEngine(Dispatcher(registry))
+    runner = JobRunner(
+        lifecycle=lifecycle,
+        registry=registry,
+        engine=engine,
+        clock=clock,
+    )
+    return runner, lifecycle
+
+
+def advance_clock_after_tool(tool, clock, at, monkeypatch):
+    execute = tool.execute
+
+    def execute_and_advance(*args):
+        result = execute(*args)
+        clock.now = at
+        return result
+
+    monkeypatch.setattr(tool, "execute", execute_and_advance)
+
+
+def test_runner_rejects_noncanonical_engine_result(snapshot, registry, tool):
+    repository = InMemoryJobRepository()
+    add_queued_job(repository, make_config(snapshot))
+    engine = StaticResultEngine(SimpleNamespace(snapshot_id=snapshot.snapshot_id))
+    runner, _ = make_runner(repository, registry, engine)
+
+    failed = run(runner, snapshot)
+
+    assert_running_failure(failed, "internal_error")
+    assert engine.calls == 1
+    assert repository.get(JOB_ID) is failed
+
+
+def test_runner_rejects_canonical_result_for_another_snapshot(
+    snapshot, registry, tool
+):
+    config = make_config(snapshot)
+    result = BacktestEngine(Dispatcher(registry)).run(
+        snapshot=snapshot,
+        period=config.period,
+        strategy=config.strategy,
+        baseline=config.baseline,
+        initial_capital=config.initial_capital,
+        commission_rate=config.commission_rate,
+    )
+    tool.calls.clear()
+    repository = InMemoryJobRepository()
+    add_queued_job(repository, config)
+    engine = StaticResultEngine(replace(result, snapshot_id="other-snapshot"))
+    runner, _ = make_runner(repository, registry, engine)
+
+    failed = run(runner, snapshot)
+
+    assert_running_failure(failed, "internal_error")
+    assert engine.calls == 1
+    assert tool.calls == []
+    assert repository.get(JOB_ID) is failed
+
+
+def test_successful_completion_uses_actual_clock(
+    snapshot, registry, tool, monkeypatch
+):
+    repository = InMemoryJobRepository()
+    add_queued_job(repository, make_config(snapshot))
+    clock = ControlledClock()
+    runner, _ = make_timed_runner(repository, registry, clock)
+    advanced = NOW + timedelta(seconds=20)
+    advance_clock_after_tool(tool, clock, advanced, monkeypatch)
+
+    completed = run(runner, snapshot)
+
+    assert completed.state is JobState.COMPLETED
+    assert completed.started_at == NOW
+    assert completed.finished_at == advanced
+    assert len(tool.calls) == len(snapshot.bars)
+
+
+def test_deadline_between_tool_calls_prevents_next_tool(
+    snapshot, registry, tool, monkeypatch
+):
+    repository = InMemoryJobRepository()
+    add_queued_job(repository, make_config(snapshot))
+    clock = ControlledClock()
+    runner, _ = make_timed_runner(repository, registry, clock)
+    expired = DEADLINE + timedelta(seconds=1)
+    advance_clock_after_tool(tool, clock, expired, monkeypatch)
+
+    failed = run(runner, snapshot)
+
+    assert_running_failure(failed, "job_timeout", expired)
+    assert len(tool.calls) == 1
+
+
+def test_deadline_after_last_tool_prevents_success(
+    snapshot, registry, tool, monkeypatch
+):
+    one_bar = replace(snapshot, bars=snapshot.bars[:1])
+    repository = InMemoryJobRepository()
+    add_queued_job(repository, make_config(one_bar))
+    clock = ControlledClock()
+    runner, _ = make_timed_runner(repository, registry, clock)
+    expired = DEADLINE + timedelta(seconds=1)
+    baseline = registry.get("buy_and_hold", "1.0.0")
+    execute_baseline = baseline.execute
+    baseline_calls = []
+
+    def execute_baseline_and_advance(*args):
+        result = execute_baseline(*args)
+        baseline_calls.append(args[0])
+        clock.now = expired
+        return result
+
+    monkeypatch.setattr(baseline, "execute", execute_baseline_and_advance)
+
+    failed = run(runner, one_bar)
+
+    assert_running_failure(failed, "job_timeout", expired)
+    assert len(tool.calls) == 1
+    assert len(baseline_calls) == 1
+
+
+@pytest.mark.parametrize("terminal", ["canceled", "failed", "worker_lost"])
+def test_job_timeout_does_not_replace_existing_terminal_job(
+    snapshot, registry, tool, terminal, monkeypatch
+):
+    repository = InMemoryJobRepository()
+    add_queued_job(repository, make_config(snapshot))
+    clock = ControlledClock()
+    runner, lifecycle = make_timed_runner(repository, registry, clock)
+    terminal_jobs = []
+
+    def make_terminal():
+        if terminal == "canceled":
+            terminal_jobs.append(lifecycle.cancel(JOB_ID, NOW))
+        elif terminal == "failed":
+            terminal_jobs.append(
+                lifecycle.fail(
+                    JOB_ID,
+                    WORKER_ID,
+                    JobFailure("internal_error", "Внешний сбой выполнения"),
+                    NOW,
+                )
+            )
+        else:
+            terminal_jobs.append(
+                lifecycle.recover_expired(JOB_ID, LEASE + timedelta(microseconds=1))
+            )
+
+    execute = tool.execute
+    expired = DEADLINE + timedelta(seconds=1)
+
+    def execute_terminal_and_advance(*args):
+        if not terminal_jobs:
+            make_terminal()
+            clock.now = expired
+        return execute(*args)
+
+    monkeypatch.setattr(tool, "execute", execute_terminal_and_advance)
+
+    returned = run(runner, snapshot)
+
+    terminal_job = terminal_jobs[0]
+    assert len(terminal_jobs) == 1
+    assert returned is terminal_job
+    assert repository.get(JOB_ID) is terminal_job
+    assert returned.history == terminal_job.history
+    assert returned.result is None
+    assert returned.finished_at == terminal_job.finished_at
+    assert len(tool.calls) == 1
+    if terminal == "canceled":
+        assert returned.error is None
+    elif terminal == "failed":
+        assert returned.error.code == "internal_error"
+    else:
+        assert returned.error.code == "worker_lost"
