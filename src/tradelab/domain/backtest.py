@@ -208,20 +208,10 @@ class BacktestEngine:
         with localcontext(_BACKTEST_CONTEXT):
             initial_cash = _money(initial_capital)
             result = self._run_single(
-                snapshot,
-                period,
-                strategy,
-                initial_cash,
-                commission_rate,
-                before_tool_call,
+                snapshot, period, strategy, initial_cash, commission_rate, before_tool_call
             )
             baseline_result = self._run_single(
-                snapshot,
-                period,
-                baseline,
-                initial_cash,
-                commission_rate,
-                before_tool_call,
+                snapshot, period, baseline, initial_cash, commission_rate, before_tool_call
             )
             metrics = replace(
                 result.metrics,
