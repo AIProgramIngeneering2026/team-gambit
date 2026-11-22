@@ -1,6 +1,6 @@
 import json
 from dataclasses import replace
-from decimal import Decimal
+from decimal import ROUND_UP, Decimal, Inexact, Rounded, localcontext
 from pathlib import Path
 
 import pytest
@@ -253,14 +253,44 @@ def test_i32_3_buy_and_hold_uses_actual_position(contract_bars):
     assert entered.indicators == kept.indicators == empty.indicators == {}
 
 
-def test_i32_5_repeated_execution_is_deterministic_and_preserves_input(contract_bars):
-    tool = SmaCrossoverTool()
-    params = tool.validate_params({"fast": 2, "slow": 3})
+@pytest.mark.parametrize(
+    ("tool", "raw_params"),
+    [
+        pytest.param(SmaCrossoverTool(), {"fast": 2, "slow": 3}, id="sma"),
+        pytest.param(BuyAndHoldTool(), {}, id="buy_and_hold"),
+    ],
+)
+@pytest.mark.parametrize("position", [Position.FLAT, Position.LONG])
+def test_i32_5_repeated_execution_is_deterministic_and_preserves_input(
+    contract_bars, tool, raw_params, position
+):
+    params = tool.validate_params(raw_params)
     bars = list(contract_bars[:5])
     original = tuple(bars)
 
-    first = tool.execute(bars, Position.FLAT, params)
-    second = tool.execute(contract_bars[:5], Position.FLAT, params)
+    first = tool.execute(bars, position, params)
+    second = tool.execute(original, position, params)
+    window = original[-tool.required_bars(params) :]
 
-    assert first == second == tool.execute(bars, Position.FLAT, params)
+    assert first == second == tool.execute(bars, position, params)
+    assert first == tool.execute(window, position, params)
     assert tuple(bars) == original
+
+
+def test_i32_5_sma_is_independent_of_callers_decimal_context(contract_bars):
+    tool = SmaCrossoverTool()
+    params = tool.validate_params({"fast": 2, "slow": 3})
+    bars = contract_bars[:5]
+    expected = tool.execute(bars, Position.FLAT, params)
+    assert expected.signal is Signal.BUY
+
+    with localcontext() as caller:
+        caller.prec = 6
+        caller.rounding = ROUND_UP
+        caller.traps[Inexact] = True
+        caller.traps[Rounded] = True
+
+        assert tool.execute(bars, Position.FLAT, params) == expected
+        assert caller.prec == 6
+        assert caller.rounding == ROUND_UP
+        assert caller.traps[Inexact] and caller.traps[Rounded]

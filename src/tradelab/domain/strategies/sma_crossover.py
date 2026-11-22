@@ -1,6 +1,6 @@
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
-from decimal import ROUND_HALF_EVEN, Decimal, localcontext
+from decimal import ROUND_HALF_EVEN, Context, Decimal, localcontext
 from typing import cast
 
 from tradelab.domain.strategy_tool import (
@@ -26,6 +26,7 @@ _PARAMS_SCHEMA = {
         "slow": {"type": "integer", "minimum": 2, "maximum": 500, "default": 50},
     },
 }
+_SMA_CONTEXT = Context(prec=28, rounding=ROUND_HALF_EVEN)
 _INDICATOR_QUANTUM = Decimal("0.0000000001")
 _EMPTY_INDICATORS = {
     "fast_previous": None,
@@ -47,12 +48,9 @@ def _average(values: Sequence[Decimal]) -> Decimal:
 
 
 def _format_indicator(value: Decimal) -> str:
-    required_precision = (
-        value.adjusted() - _INDICATOR_QUANTUM.as_tuple().exponent + 2
-    )
-    with localcontext() as context:
-        context.prec = max(28, required_precision)
-        context.rounding = ROUND_HALF_EVEN
+    required_precision = value.adjusted() - _INDICATOR_QUANTUM.as_tuple().exponent + 2
+    with localcontext(_SMA_CONTEXT) as context:
+        context.prec = max(context.prec, required_precision)
         rounded = value.quantize(_INDICATOR_QUANTUM, rounding=ROUND_HALF_EVEN)
         if not rounded.is_finite():
             raise ValueError("Индикатор SMA не является конечным числом")
@@ -128,10 +126,8 @@ class SmaCrossoverTool:
                 indicators=_EMPTY_INDICATORS,
             )
 
-        with localcontext() as context:
-            context.prec = 28
-            context.rounding = ROUND_HALF_EVEN
-            current_closes = tuple(bar.close for bar in closed_bars)
+        with localcontext(_SMA_CONTEXT):
+            current_closes = tuple(bar.close for bar in closed_bars[-required:])
             previous_closes = current_closes[:-1]
             fast_previous = _average(previous_closes[-fast:])
             slow_previous = _average(previous_closes[-slow:])
