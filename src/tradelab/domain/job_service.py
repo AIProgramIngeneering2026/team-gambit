@@ -1,9 +1,8 @@
 import re
 from collections.abc import Callable
-from datetime import UTC, date, datetime
-from decimal import ROUND_HALF_UP, Decimal, localcontext
+from datetime import UTC, date, datetime, timedelta, timezone
+from decimal import ROUND_HALF_UP, Decimal, Inexact, Rounded, localcontext
 from uuid import uuid4
-from zoneinfo import ZoneInfo
 
 from .backtest import BacktestEngine
 from .backtest_types import BacktestPeriod, StrategySpec
@@ -19,7 +18,7 @@ _TICKER_PATTERN = re.compile(r"[A-Za-z0-9]{1,12}")
 _STRATEGY_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _MONEY_QUANTUM = Decimal("0.01")
 _DEFAULT_PARAMS = object()
-_MARKET_TIMEZONE = ZoneInfo("Europe/Moscow")
+_MARKET_TIMEZONE = timezone(timedelta(hours=3), name="Europe/Moscow")
 
 
 def _utc_now() -> datetime:
@@ -128,6 +127,8 @@ class JobService:
         baseline_params = baseline_tool.validate_params({})
         with localcontext() as context:
             context.prec = 28
+            context.traps[Inexact] = False
+            context.traps[Rounded] = False
             capital = capital.quantize(_MONEY_QUANTUM, rounding=ROUND_HALF_UP)
 
         config = BacktestJobConfig(
@@ -194,7 +195,7 @@ class JobService:
             raise _invalid_params(
                 "Дата окончания не может быть в будущем", "period.end", "in_future"
             )
-        if (period.end - period.start).days > 3653:
+        if (period.end - period.start).days >= 3653:
             raise _invalid_params(
                 "Период не может быть длиннее 3653 дней",
                 "period",
