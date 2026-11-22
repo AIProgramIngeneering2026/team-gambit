@@ -1,6 +1,10 @@
+import os
+import subprocess
+import sys
 from dataclasses import FrozenInstanceError
-from datetime import UTC, date, datetime
-from decimal import Decimal, localcontext
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal, Inexact, Rounded, localcontext
+from pathlib import Path
 
 import pytest
 
@@ -130,13 +134,29 @@ def test_c5_start_must_be_before_end_without_creating_job(service_parts, period)
     )
 
 
-def test_c5_too_long_period_does_not_create_job(service_parts):
+def test_c1_1_period_with_3653_included_days_is_accepted(service_parts):
+    service, repository = service_parts
+    period = BacktestPeriod(
+        date(2016, 1, 1), date(2016, 1, 1) + timedelta(days=3652)
+    )
+
+    job = create(service, period=period)
+
+    assert job.state is JobState.QUEUED
+    assert job.config is not None
+    assert job.config.period == period
+    assert repository.get(JOB_ID) is job
+
+
+def test_c5_period_with_3654_included_days_does_not_create_job(service_parts):
     assert_rejected_without_job(
         service_parts,
         "invalid_params",
         "period",
         "too_long",
-        period=BacktestPeriod(date(2010, 1, 1), date(2020, 1, 5)),
+        period=BacktestPeriod(
+            date(2016, 1, 1), date(2016, 1, 1) + timedelta(days=3653)
+        ),
     )
 
 
@@ -244,3 +264,64 @@ def test_c1_1_capital_quantization_isolates_caller_decimal_context(service_parts
         assert job.config.initial_capital == Decimal("100000.01")
         assert context.prec == 5
     assert repository.get(JOB_ID) is job
+
+
+def test_c1_1_expected_capital_rounding_ignores_caller_inexact_traps(service_parts):
+    service, repository = service_parts
+    with localcontext() as context:
+        context.traps[Inexact] = True
+        context.traps[Rounded] = True
+
+        job = create(service, initial_capital="100000.009")
+
+        assert job.state is JobState.QUEUED
+        assert job.config is not None
+        assert job.config.initial_capital == Decimal("100000.01")
+        assert context.traps[Inexact]
+        assert context.traps[Rounded]
+    assert repository.get(JOB_ID) is job
+
+
+def test_c1_1_import_and_moscow_midnight_do_not_require_iana_tzdata(tmp_path):
+    script = """
+from datetime import UTC, date, datetime
+
+from tradelab.domain.backtest_types import BacktestPeriod
+from tradelab.domain.instrument_catalog import InMemoryInstrumentCatalog
+from tradelab.domain.job_repository import InMemoryJobRepository
+from tradelab.domain.job_service import JobService
+from tradelab.domain.registry import Registry
+from tradelab.domain.strategies import register_builtin_strategies
+
+registry = Registry()
+register_builtin_strategies(registry)
+service = JobService(
+    repository=InMemoryJobRepository(),
+    registry=registry,
+    instruments=InMemoryInstrumentCatalog({"EXMPL"}),
+    clock=lambda: datetime(2026, 11, 21, 21, tzinfo=UTC),
+    id_factory=lambda: "job-1",
+)
+job = service.create_backtest(
+    ticker="EXMPL",
+    strategy="sma_crossover",
+    params={},
+    period=BacktestPeriod(date(2026, 11, 21), date(2026, 11, 22)),
+)
+assert job.state == "queued"
+print(job.state)
+"""
+    environment = os.environ.copy()
+    environment["PYTHONTZPATH"] = str(tmp_path / "missing-iana-tzdata")
+    environment["PYTHONPATH"] = str(Path(__file__).parents[2] / "src")
+
+    completed = subprocess.run(
+        [sys.executable, "-S", "-c", script],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert completed.stdout.strip() == "queued"
