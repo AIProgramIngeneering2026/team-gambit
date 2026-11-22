@@ -4,7 +4,7 @@ from decimal import Decimal, localcontext
 
 import pytest
 
-from tradelab.domain.backtest import BacktestPeriod
+from tradelab.domain.backtest_types import BacktestPeriod
 from tradelab.domain.instrument_catalog import InMemoryInstrumentCatalog
 from tradelab.domain.job import Job, JobState
 from tradelab.domain.job_repository import InMemoryJobRepository

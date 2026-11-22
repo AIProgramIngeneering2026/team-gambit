@@ -1,10 +1,10 @@
 from dataclasses import dataclass, replace
-from datetime import date, datetime
+from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 from typing import Literal, TypeAlias, get_args
 
-from .backtest import BacktestPeriod, StrategySpec
+from .backtest_types import BacktestPeriod, BacktestResult, StrategySpec
 
 
 class JobState(StrEnum):
@@ -75,49 +75,6 @@ class StateTransition:
 class JobFailure:
     code: JobFailureCode
     message: str
-
-
-@dataclass(frozen=True, slots=True)
-class BacktestMetrics:
-    total_return: Decimal
-    buy_and_hold_return: Decimal
-    max_drawdown: Decimal
-    sharpe_ratio: Decimal | None
-    final_equity: Decimal
-    trades_count: int
-    closed_positions_count: int
-    win_rate: Decimal | None
-    avg_position_return: Decimal | None
-
-
-@dataclass(frozen=True, slots=True)
-class EquityPoint:
-    date: date
-    equity: Decimal
-
-
-@dataclass(frozen=True, slots=True)
-class Trade:
-    side: Literal["BUY", "SELL"]
-    signal_date: date
-    execution_date: date
-    price: Decimal
-    quantity: int
-    commission: Decimal
-    reason_code: str
-    reason_message: str
-    pnl: Decimal | None
-
-
-@dataclass(frozen=True, slots=True)
-class BacktestResult:
-    metrics: BacktestMetrics
-    equity_curve: tuple[EquityPoint, ...]
-    trades: tuple[Trade, ...]
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "equity_curve", tuple(self.equity_curve))
-        object.__setattr__(self, "trades", tuple(self.trades))
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,6 +179,10 @@ class Job:
             )
         if result is None:
             raise ValueError("Для завершения задания нужен результат бэктеста")
+        if not isinstance(result, BacktestResult):
+            raise ValueError("Результат бэктеста имеет неверный тип")
+        if result.snapshot_id != self.snapshot_id:
+            raise ValueError("Результат расчёта ссылается на другой снимок данных")
         return self._transition(
             JobState.COMPLETED, now, "worker", finished_at=now, result=result
         )
