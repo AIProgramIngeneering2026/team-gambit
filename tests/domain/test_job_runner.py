@@ -628,9 +628,13 @@ def test_real_terminal_transition_inside_tool_discards_late_response(
     repository = InMemoryJobRepository()
     add_queued_job(repository, make_config(snapshot))
     runner, lifecycle = make_runner(repository, registry)
+    terminal_attempts = []
     terminal_jobs = []
+    complete_attempts = []
+    fail_attempts = []
 
     def make_terminal():
+        terminal_attempts.append(terminal)
         if terminal == "canceled":
             terminal_jobs.append(lifecycle.cancel(JOB_ID, NOW))
         elif terminal == "failed":
@@ -647,28 +651,61 @@ def test_real_terminal_transition_inside_tool_discards_late_response(
                 lifecycle.recover_expired(JOB_ID, LEASE + timedelta(microseconds=1))
             )
 
+    complete = lifecycle.complete
+    fail = lifecycle.fail
+
+    def counted_complete(*args):
+        complete_attempts.append(len(tool.calls))
+        return complete(*args)
+
+    def counted_fail(*args):
+        fail_attempts.append(args[2].code)
+        return fail(*args)
+
+    monkeypatch.setattr(lifecycle, "complete", counted_complete)
+    monkeypatch.setattr(lifecycle, "fail", counted_fail)
+
     execute = tool.execute
 
     def execute_with_real_transition(*args):
-        make_terminal()
+        if not terminal_attempts:
+            make_terminal()
         return execute(*args)
 
     monkeypatch.setattr(tool, "execute", execute_with_real_transition)
 
     returned = run(runner, snapshot)
 
+    assert terminal_attempts == [terminal]
+    assert len(terminal_jobs) == 1
     terminal_job = terminal_jobs[0]
     assert returned is terminal_job
     assert repository.get(JOB_ID) is terminal_job
     assert returned.result is None
     assert returned.history == terminal_job.history
+    assert len(returned.history) == 4
+    assert returned.history[-1].to_state is {
+        "canceled": JobState.CANCELED,
+        "failed": JobState.FAILED,
+        "worker_lost": JobState.FAILED,
+    }[terminal]
     if terminal == "canceled":
         assert returned.error is None
     elif terminal == "failed":
         assert returned.error.message == "Внешний сбой выполнения"
     else:
         assert returned.error.code == "worker_lost"
-    assert tool.calls
+
+    expected_failures = ["tool_failed"] if outcome == "tool_failure" else []
+    if terminal == "failed":
+        expected_failures.insert(0, "internal_error")
+    assert fail_attempts == expected_failures
+    if outcome == "success":
+        assert len(tool.calls) == len(snapshot.bars)
+        assert complete_attempts == [len(snapshot.bars)]
+    else:
+        assert len(tool.calls) == 1
+        assert complete_attempts == []
 
 
 def test_repository_exception_during_completion_is_not_masked(
