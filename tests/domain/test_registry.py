@@ -156,6 +156,23 @@ def test_catalog_reads_current_tool_schema_and_description():
     assert schema["properties"]["window"]["default"] == 1
 
 
+def test_registry_catalog_with_multiple_names_lists_each_current_version():
+    registry = Registry()
+    another = ExampleTool("1.0.0")
+    another.name = "another"
+    first = ExampleTool("1.0.0")
+    current = ExampleTool("2.0.0")
+    registry.register(first)
+    registry.register(another)
+    registry.register(current, current=True)
+
+    catalog = registry.catalog()
+
+    assert len(catalog) == 2
+    assert {tool.name: tool for tool in catalog} == {"another": another, "example": current}
+    assert registry.get("example", "1.0.0") is first
+
+
 def test_normalized_params_are_immutable_even_for_nested_inputs():
     raw = {"filters": [{"window": 3}]}
     params = NormalizedParams(raw)

@@ -49,6 +49,22 @@ def test_i32_2_defaults_and_required_bars():
     assert baseline.required_bars(baseline.validate_params({})) == 1
 
 
+@pytest.mark.parametrize(
+    ("params", "required_bars"),
+    [
+        pytest.param({"fast": 1, "slow": 2}, 3, id="minimum-periods"),
+        pytest.param({"fast": 499, "slow": 500}, 501, id="maximum-periods"),
+    ],
+)
+def test_sma_validate_params_at_inclusive_limits_accepts_periods(params, required_bars):
+    tool = SmaCrossoverTool()
+
+    normalized = tool.validate_params(params)
+
+    assert dict(normalized) == params
+    assert tool.required_bars(normalized) == required_bars
+
+
 def test_i32_2_contract_invalid_params(contract_cases):
     registry = Registry()
     register_builtin_strategies(registry)

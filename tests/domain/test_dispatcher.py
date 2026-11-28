@@ -75,6 +75,27 @@ def test_dispatcher_preserves_unknown_operation_from_registry(contract_bars):
     assert raised.value is error
 
 
+def test_dispatcher_execute_with_unavailable_saved_version_does_not_call_current_tool(contract_bars):
+    registry = Registry()
+    current = ArbitraryTool()
+    registry.register(current)
+    dispatcher = Dispatcher(registry)
+    bars = contract_bars[:1]
+    params = NormalizedParams({})
+
+    with pytest.raises(ToolError) as raised:
+        dispatcher.execute(current.name, "1.0.0", bars, Position.FLAT, params)
+
+    assert raised.value.code == "strategy_unavailable"
+    assert raised.value.details == {
+        "field": "strategy.version",
+        "reason": "strategy_unavailable",
+        "name": current.name,
+        "version": "1.0.0",
+    }
+    assert current.calls == []
+
+
 def test_dispatcher_preserves_domain_tool_error(contract_bars):
     error = ToolError(
         "insufficient_data",
