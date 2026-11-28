@@ -53,7 +53,16 @@ PYTHONPATH=src uv run --no-project --with pytest python -m pytest -q tests/domai
 uv run pytest -q
 ```
 
-Полная проверка перед pull request — тесты, ссылки в документах, OpenAPI, независимость ядра и Ruff:
+Покрытие строк и ветвей измеряется для пакета `tradelab`:
+
+```bash
+uv run coverage run -m pytest -q
+uv run coverage report
+```
+
+Граница установлена в `pyproject.toml`. При покрытии ниже 85% команда `coverage report` возвращает ошибку, а проверка `check` в GitHub Actions завершается неуспешно. Отчёт с итогом и непокрытыми строками доступен в логе проверки.
+
+Полная проверка перед pull request — тесты, порог покрытия, ссылки в документах, OpenAPI, независимость ядра и Ruff:
 
 ```bash
 scripts/harness/check.sh

@@ -21,7 +21,8 @@ fi
 if [ -f pyproject.toml ]; then
   run "ядро не зависит от фреймворка и БД" python3 scripts/harness/fitness.py core-imports
   if grep -q '\[tool.ruff' pyproject.toml; then run "ruff" uv run ruff check .; fi
-  run "pytest" uv run pytest -q
+  run "pytest с измерением покрытия" uv run coverage run -m pytest -q
+  run "порог покрытия" uv run coverage report
 fi
 
 exit "$failed"
