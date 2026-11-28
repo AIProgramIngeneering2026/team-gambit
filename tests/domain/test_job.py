@@ -74,6 +74,40 @@ RESULT = BacktestResult(
 )
 
 
+@pytest.mark.parametrize(
+    ("worker_id", "lease_expires_at", "deadline_at"),
+    [
+        pytest.param("", LEASE, DEADLINE, id="missing-worker"),
+        pytest.param("worker-1", NOW, DEADLINE, id="expired-lease"),
+        pytest.param("worker-1", LEASE, NOW, id="expired-deadline"),
+    ],
+)
+def test_job_start_with_invalid_claim_keeps_job_queued(worker_id, lease_expires_at, deadline_at):
+    queued = Job("job-1", NOW).enqueue(NOW)
+
+    with pytest.raises(ValueError, match="worker_id"):
+        queued.start(worker_id, NOW, lease_expires_at=lease_expires_at, deadline_at=deadline_at)
+
+    assert queued.state is JobState.QUEUED
+    assert queued.worker_id is None
+    assert queued.started_at is None
+    assert tuple(entry.to_state for entry in queued.history) == (JobState.CREATED, JobState.QUEUED)
+
+
+def test_job_start_with_valid_claim_records_worker_and_deadlines():
+    queued = Job("job-1", NOW).enqueue(NOW)
+
+    running = queued.start("worker-1", NOW, lease_expires_at=LEASE, deadline_at=DEADLINE)
+
+    assert running.state is JobState.RUNNING
+    assert (running.worker_id, running.started_at) == ("worker-1", NOW)
+    assert (running.lease_expires_at, running.deadline_at) == (LEASE, DEADLINE)
+    assert running.history[:-1] == queued.history
+    assert running.history[-1].from_state is JobState.QUEUED
+    assert running.history[-1].actor == "worker"
+    assert queued.state is JobState.QUEUED
+
+
 @pytest.fixture
 def lifecycle():
     repository = InMemoryJobRepository()
